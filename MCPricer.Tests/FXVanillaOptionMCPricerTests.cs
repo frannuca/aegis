@@ -1,0 +1,560 @@
+using Aegis.Instruments;
+using AnalyticalPricers;
+using MCPricer.FX;
+using RandomSimulator;
+
+namespace MCPricer.Tests;
+
+/// <summary>
+/// Validates FXVanillaOptionMCPricer against the Garman-Kohlhagen analytical formula.
+///
+/// Garman-Kohlhagen (1983) — European FX option under Q^d (domestic numeraire):
+///
+///   Call = S·e^{-r_f·T}·N(d₁) − K·e^{-r_d·T}·N(d₂)
+///   Put  = K·e^{-r_d·T}·N(−d₂) − S·e^{-r_f·T}·N(−d₁)
+///
+///   d₁ = [log(S/K) + (r_d − r_f + ½σ²)·T] / (σ√T)
+///   d₂ = d₁ − σ√T
+///
+/// Put-call parity (GK):
+///   Call − Put = S·e^{-r_f·T} − K·e^{-r_d·T}    (model-free from no-arbitrage)
+///
+/// ── Confidence interval methodology ─────────────────────────────────────────
+/// All MC vs analytical comparisons use a 5σ bound:
+///   |MC_price − GK_price| < 5 × SE
+///
+/// where SE is the sample standard error of the mean returned by PricingResult.
+/// At 5σ, the probability of a spurious failure per test is < 6×10⁻⁷.
+/// Deterministic seeds guarantee that failures are reproducible.
+///
+/// ── Path count choice ────────────────────────────────────────────────────────
+/// 100,000 paths give SE ≈ 0.05 for typical ATM payoffs, so the 5σ bound is ≈ 0.25.
+/// This catches real pricing errors (which would be much larger) while running
+/// in well under a second per test.
+/// </summary>
+public sealed class FXVanillaOptionMCPricerTests
+{
+    // ── Reference parameters (used in most tests) ──────────────────────────────
+    // EURUSD: spot = 1.10, K = 1.10 (ATM), T = 1y, σ = 20%, r_d (USD) = 5%, r_f (EUR) = 2%
+    private const double S0    = 1.10;
+    private const double K     = 1.10;
+    private const double T     = 1.0;
+    private const double Sigma = 0.20;
+    private const double Rd    = 0.05;
+    private const double Rf    = 0.02;
+
+    private const int Paths      = 100_000;
+    private const int Steps      = 1;       // single step suffices for European payoffs
+    private const int DefaultSeed = 42;
+
+    // Pricers now take rates as Pillars zero-rate curves (term structures), interpolated
+    // at the option's expiry from this valuation date — see ZeroCurve.InterpolateRate.
+    // Tests use single-pillar "flat" curves so the interpolated rate equals the scalar
+    // reference rate (Rd, Rf) regardless of T, keeping the GK analytical comparison exact.
+    private static readonly DateOnly ValuationDate = new(2026, 1, 1);
+    private static readonly DateOnly CurveMaturity = new(2036, 1, 1);
+
+    // ── Garman-Kohlhagen price tests ──────────────────────────────────────────
+
+    [Fact]
+    public void AtmCall_MatchesGarmanKohlhagen()
+    {
+        var (mc, gk) = RunAndCompare(S0, K, T, Sigma, Rd, Rf, isCall: true);
+        AssertWithinMcBounds(mc, gk, sigma: 5.0);
+    }
+
+    [Fact]
+    public void AtmPut_MatchesGarmanKohlhagen()
+    {
+        var (mc, gk) = RunAndCompare(S0, K, T, Sigma, Rd, Rf, isCall: false);
+        AssertWithinMcBounds(mc, gk, sigma: 5.0);
+    }
+
+    [Fact]
+    public void OtmCall_MatchesGarmanKohlhagen()
+    {
+        // K = 1.20 is ~9% OTM for a spot of 1.10
+        var (mc, gk) = RunAndCompare(S0, strike: 1.20, T, Sigma, Rd, Rf, isCall: true);
+        AssertWithinMcBounds(mc, gk, sigma: 5.0);
+    }
+
+    [Fact]
+    public void ItmCall_MatchesGarmanKohlhagen()
+    {
+        // K = 1.00 is ~9% ITM
+        var (mc, gk) = RunAndCompare(S0, strike: 1.00, T, Sigma, Rd, Rf, isCall: true);
+        AssertWithinMcBounds(mc, gk, sigma: 5.0);
+    }
+
+    [Fact]
+    public void OtmPut_MatchesGarmanKohlhagen()
+    {
+        var (mc, gk) = RunAndCompare(S0, strike: 1.00, T, Sigma, Rd, Rf, isCall: false);
+        AssertWithinMcBounds(mc, gk, sigma: 5.0);
+    }
+
+    [Fact]
+    public void HighVolatility_MatchesGarmanKohlhagen()
+    {
+        var (mc, gk) = RunAndCompare(S0, K, T, sigma: 0.50, Rd, Rf, isCall: true);
+        AssertWithinMcBounds(mc, gk, sigma: 5.0);
+    }
+
+    [Fact]
+    public void LowVolatility_MatchesGarmanKohlhagen()
+    {
+        var (mc, gk) = RunAndCompare(S0, K, T, sigma: 0.05, Rd, Rf, isCall: true);
+        AssertWithinMcBounds(mc, gk, sigma: 5.0);
+    }
+
+    [Fact]
+    public void ShortExpiry_MatchesGarmanKohlhagen()
+    {
+        // T = 1 week: strong time-step approximation test (single-step for European is exact)
+        var (mc, gk) = RunAndCompare(S0, K, expiry: 1.0 / 52, Sigma, Rd, Rf, isCall: true);
+        AssertWithinMcBounds(mc, gk, sigma: 5.0);
+    }
+
+    [Fact]
+    public void LongExpiry_MatchesGarmanKohlhagen()
+    {
+        var (mc, gk) = RunAndCompare(S0, K, expiry: 5.0, Sigma, Rd, Rf, isCall: true);
+        AssertWithinMcBounds(mc, gk, sigma: 5.0);
+    }
+
+    [Fact]
+    public void ZeroForeignRate_MatchesGarmanKohlhagen()
+    {
+        // r_f = 0 reduces GK to the standard Black-Scholes call formula
+        var (mc, gk) = RunAndCompare(S0, K, T, Sigma, Rd, rf: 0.0, isCall: true);
+        AssertWithinMcBounds(mc, gk, sigma: 5.0);
+    }
+
+    [Fact]
+    public void ZeroDomesticRate_MatchesGarmanKohlhagen()
+    {
+        var (mc, gk) = RunAndCompare(S0, K, T, Sigma, rd: 0.0, Rf, isCall: true);
+        AssertWithinMcBounds(mc, gk, sigma: 5.0);
+    }
+
+    [Fact]
+    public void EqualRates_MatchesGarmanKohlhagen()
+    {
+        // r_d = r_f: forward = spot, so ATM forward = ATM spot
+        var (mc, gk) = RunAndCompare(S0, K, T, Sigma, rd: 0.03, rf: 0.03, isCall: true);
+        AssertWithinMcBounds(mc, gk, sigma: 5.0);
+    }
+
+    // ── Multi-step path: same answer as single-step for European ──────────────
+
+    [Fact]
+    public void DailySteps_MatchesSingleStep_WithinMcNoise()
+    {
+        // A European option price must be independent of the number of time steps
+        // because only terminal spot enters the payoff. Both pricers run on
+        // independent cubes; we compare their prices to GK rather than each other.
+        const int dailySteps = 252;
+
+        var cube1Step    = SimulationCube.GenerateIndependent(Paths, 1,          1, DefaultSeed);
+        var cube252Steps = SimulationCube.GenerateIndependent(Paths, dailySteps, 1, DefaultSeed + 1);
+
+        var (mc1, _)   = RunAndCompareWithCube(S0, K, T, Sigma, Rd, Rf, true, cube1Step);
+        var (mc252, _) = RunAndCompareWithCube(S0, K, T, Sigma, Rd, Rf, true, cube252Steps);
+        var gk         = GarmanKohlhagen.Price(S0, K, T, Sigma, Rd, Rf, isCall: true);
+
+        AssertWithinMcBounds(mc1,   gk, sigma: 5.0);
+        AssertWithinMcBounds(mc252, gk, sigma: 5.0);
+    }
+
+    // ── Put-call parity ───────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData(1.00, "ITM call / OTM put")]
+    [InlineData(1.10, "ATM")]
+    [InlineData(1.20, "OTM call / ITM put")]
+    public void PutCallParity_HoldsWithinMcNoise(double strike, string _)
+    {
+        // Call - Put = S·e^{-r_f·T} - K·e^{-r_d·T}
+        // Use the same cube for both pricers to minimise cancellation noise.
+        // With the same paths, Call_MC - Put_MC ≈ exact even at low path counts.
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var mcCall = BuildPricer(S0, strike, T, Sigma, Rd, Rf, true,  cube).Price();
+        var mcPut  = BuildPricer(S0, strike, T, Sigma, Rd, Rf, false, cube).Price();
+
+        var mcParity       = mcCall.Price - mcPut.Price;
+        var analyticalParity = S0 * Math.Exp(-Rf * T) - strike * Math.Exp(-Rd * T);
+
+        // SE of the difference: for same cube, payoffs are perfectly anti-correlated
+        // for ATM, so SE_diff < SE_call + SE_put. Use sum as conservative bound.
+        var seDiff = mcCall.StandardError + mcPut.StandardError;
+
+        Assert.True(Math.Abs(mcParity - analyticalParity) < 5.0 * seDiff,
+            $"Strike={strike}: MC parity={mcParity:F6}  analytical={analyticalParity:F6}  " +
+            $"5σ tolerance={5.0 * seDiff:F6}");
+    }
+
+    // ── Zero volatility edge case ─────────────────────────────────────────────
+
+    [Fact]
+    public void ZeroVol_ItmCall_PricesAtDiscountedIntrinsic()
+    {
+        // σ = 0: path is deterministic, S(T) = S·exp((r_d-r_f)·T).
+        // Call price = max(F·e^{-r_d·T} - K·e^{-r_d·T}, 0) = e^{-r_d·T}·max(F-K, 0)
+        // where F = S·e^{(r_d-r_f)·T} is the forward.
+        var forward   = S0 * Math.Exp((Rd - Rf) * T);
+        var expected  = Math.Exp(-Rd * T) * Math.Max(forward - K, 0.0);
+
+        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var mc   = BuildPricer(S0, K, T, sigma: 0.0, Rd, Rf, isCall: true, cube).Price();
+
+        Assert.Equal(expected, mc.Price, precision: 10);   // exact: deterministic path
+    }
+
+    [Fact]
+    public void ZeroVol_OtmCall_PricesAtZero()
+    {
+        // Forward S·e^{(r_d-r_f)·T} < K when r_d - r_f < log(K/S)/T.
+        // Here S=1.10, K=1.30, r_d=0.02, r_f=0.05, T=1: forward ≈ 1.067 < 1.30
+        const double otmStrike = 1.30;
+        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var mc   = BuildPricer(S0, otmStrike, T, sigma: 0.0, rd: 0.02, rf: 0.05, isCall: true, cube).Price();
+
+        Assert.Equal(0.0, mc.Price, precision: 10);
+    }
+
+    [Fact]
+    public void ZeroVol_GarmanKohlhagen_Agrees()
+    {
+        // With σ→0, GK formula degenerates to the same discounted-intrinsic value.
+        // Use σ=1e-8 (not exactly 0) for GK (NaN-safe); MC uses σ=0 exactly.
+        const double tinyVol = 1e-8;
+        var gk = GarmanKohlhagen.Price(S0, K, T, tinyVol, Rd, Rf, isCall: true);
+        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var mc   = BuildPricer(S0, K, T, sigma: 0.0, Rd, Rf, isCall: true, cube).Price();
+
+        Assert.Equal(gk, mc.Price, precision: 6);
+    }
+
+    // ── Convergence: Sobol beats pseudo-random at low path count ─────────────
+
+    /// <summary>
+    /// At N = 2048 paths, the Sobol error must be smaller than the median
+    /// pseudo-random error over 101 seeds.
+    ///
+    /// This validates that the pricer correctly reads from the cube's
+    /// quasi-random draws and that Sobol's O((log N)/N) convergence holds
+    /// for this smooth payoff.
+    /// </summary>
+    [Fact]
+    public void Sobol_ConvergesFasterThanPseudo_ForAtmCall()
+    {
+        const int lowPaths = 2048;
+        var gk = GarmanKohlhagen.Price(S0, K, T, Sigma, Rd, Rf, isCall: true);
+
+        var sobolCube  = SimulationCube.GenerateIndependent(lowPaths, 1, 1, method: SamplingMethod.QuasiRandom);
+        var sobolPrice = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, sobolCube).Price().Price;
+        var sobolError = Math.Abs(sobolPrice - gk);
+
+        var pseudoErrors = new double[101];
+        for (var seed = 0; seed < pseudoErrors.Length; seed++)
+        {
+            var cube  = SimulationCube.GenerateIndependent(lowPaths, 1, 1, seed: seed, method: SamplingMethod.PseudoRandom);
+            var price = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube).Price().Price;
+            pseudoErrors[seed] = Math.Abs(price - gk);
+        }
+        Array.Sort(pseudoErrors);
+        var pseudoMedian = pseudoErrors[pseudoErrors.Length / 2];
+
+        Assert.True(sobolError < pseudoMedian,
+            $"Sobol error {sobolError:F6} must be < pseudo median error {pseudoMedian:F6} " +
+            $"(GK={gk:F6}, Sobol={sobolPrice:F6})");
+    }
+
+    // ── Antithetics reduce variance ───────────────────────────────────────────
+
+    [Fact]
+    public void Antithetics_ReduceStandardError()
+    {
+        const int halfPaths = 50_000;   // antithetic cube has halfPaths×2 = 100k paths total
+
+        var cubeNo  = SimulationCube.GenerateIndependent(halfPaths * 2, 1, 1, seed: 77, useAntithetics: false);
+        var cubeAV  = SimulationCube.GenerateIndependent(halfPaths * 2, 1, 1, seed: 77, useAntithetics: true);
+
+        var seNo = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cubeNo).Price().StandardError;
+        var seAV = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cubeAV).Price().StandardError;
+
+        Assert.True(seAV < seNo,
+            $"Antithetic SE {seAV:F6} must be less than plain SE {seNo:F6}");
+    }
+
+    // ── Input validation ──────────────────────────────────────────────────────
+
+    [Fact]
+    public void NegativeVolatility_Throws()
+    {
+        var cube = SimulationCube.GenerateIndependent(100, 1, 1);
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            BuildPricer(S0, K, T, sigma: -0.01, Rd, Rf, true, cube));
+    }
+
+    [Fact]
+    public void ZeroStrike_Throws()
+    {
+        var cube = SimulationCube.GenerateIndependent(100, 1, 1);
+        Assert.Throws<ArgumentException>(() =>
+            BuildPricer(S0, strike: 0.0, T, Sigma, Rd, Rf, true, cube));
+    }
+
+    [Fact]
+    public void ZeroSpot_Throws()
+    {
+        var cube = SimulationCube.GenerateIndependent(100, 1, 1);
+        Assert.Throws<ArgumentException>(() =>
+            BuildPricer(spot: 0.0, K, T, Sigma, Rd, Rf, true, cube));
+    }
+
+    [Fact]
+    public void ZeroExpiry_Throws()
+    {
+        var cube = SimulationCube.GenerateIndependent(100, 1, 1);
+        Assert.Throws<ArgumentException>(() =>
+            BuildPricer(S0, K, expiry: 0.0, Sigma, Rd, Rf, true, cube));
+    }
+
+    [Fact]
+    public void WrongOptionKind_Throws()
+    {
+        // Passing a BarrierOption to the vanilla pricer must throw.
+        var cube = SimulationCube.GenerateIndependent(100, 1, 1);
+        var barrierOpt = new Option
+        {
+            Underlying   = "EURUSD",
+            Strike       = K,
+            ExpiryYears  = T,
+            OptionType   = OptionType.Call,
+            Barrier      = new BarrierOption
+            {
+                BarrierLevel = 1.20,
+                BarrierType  = BarrierType.UpAndOut,
+                Observation  = BarrierObservation.Discrete
+            }
+        };
+        var market = MakeMarket(S0, Rd, Rf);
+        Assert.Throws<ArgumentException>(() =>
+            new FXVanillaOptionMCPricer(barrierOpt, ValuationDate, market, Sigma, cube));
+    }
+
+    // ── Async pricing ─────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task PriceAsync_NoToken_MatchesGarmanKohlhagen()
+    {
+        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        using var pricer = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube);
+
+        var result = await pricer.PriceAsync();
+        var gk     = GarmanKohlhagen.Price(S0, K, T, Sigma, Rd, Rf, isCall: true);
+
+        AssertWithinMcBounds(result, gk, sigma: 5.0);
+    }
+
+    [Fact]
+    public async Task PriceAsync_DefaultToken_MatchesSyncPrice()
+    {
+        // Async and sync must agree within floating-point rounding from parallel
+        // summation order — well within one standard error of each other.
+        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        using var pricer = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube);
+
+        var gk   = GarmanKohlhagen.Price(S0, K, T, Sigma, Rd, Rf, isCall: true);
+        var sync  = pricer.Price();
+        var async_ = await pricer.PriceAsync();
+
+        // Both must be close to GK; the exact values may differ due to parallel
+        // addition reordering, so we compare each independently to the reference.
+        AssertWithinMcBounds(sync,   gk, sigma: 5.0);
+        AssertWithinMcBounds(async_, gk, sigma: 5.0);
+    }
+
+    // ── Cancellation ──────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task PriceAsync_PreCancelledToken_ThrowsImmediately()
+    {
+        // When the token is already cancelled, Task.Run cancels the task before
+        // the lambda body runs and throws TaskCanceledException (a subclass of
+        // OperationCanceledException). ThrowsAnyAsync matches any assignable type.
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        using var pricer = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => pricer.PriceAsync(cts.Token));
+    }
+
+    [Fact]
+    public async Task PriceAsync_CancelledDuringRun_ThrowsOperationCanceledException()
+    {
+        // SlowMCPricer sleeps 1 ms per path, making each path's latency hardware-
+        // independent. With 1000 paths and CancelAfter(10 ms), at most ~10 × num_cores
+        // paths complete before the token fires, leaving hundreds outstanding.
+        // The per-path ct.ThrowIfCancellationRequested() in RunParallel then raises OCE.
+        using var cts    = new CancellationTokenSource(TimeSpan.FromMilliseconds(10));
+        using var pricer = new SlowMCPricer(paths: 1000);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => pricer.PriceAsync(cts.Token));
+    }
+
+    [Fact]
+    public async Task PriceAsync_Cancelled_ExceptionCarriesToken()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        using var pricer = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube);
+
+        // ThrowsAnyAsync accepts TaskCanceledException (pre-cancel) and
+        // OperationCanceledException (mid-run cancel) equally.
+        var ex = await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => pricer.PriceAsync(cts.Token));
+
+        Assert.Equal(cts.Token, ex.CancellationToken);
+    }
+
+    [Fact]
+    public async Task PriceAsync_MultipleConcurrentCalls_AllSucceed()
+    {
+        // Same pricer instance, three concurrent async pricings.
+        // ThreadLocal state must keep each call's scratch buffers isolated.
+        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        using var pricer = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube);
+        var gk   = GarmanKohlhagen.Price(S0, K, T, Sigma, Rd, Rf, isCall: true);
+
+        var tasks = Enumerable.Range(0, 3)
+                              .Select(_ => pricer.PriceAsync())
+                              .ToArray();
+        var results = await Task.WhenAll(tasks);
+
+        foreach (var r in results)
+            AssertWithinMcBounds(r, gk, sigma: 5.0);
+    }
+
+    // ── PricingResult contract ────────────────────────────────────────────────
+
+    [Fact]
+    public void PricingResult_ConfidenceIntervalContainsPrice()
+    {
+        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var result = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube).Price();
+
+        Assert.True(result.ConfidenceIntervalLower <= result.Price);
+        Assert.True(result.Price <= result.ConfidenceIntervalUpper);
+        Assert.True(result.StandardError > 0.0);
+        Assert.Equal(Paths, result.Paths);
+    }
+
+    [Fact]
+    public void PricingResult_ConfidenceIntervalWidth_MatchesSe()
+    {
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var result = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube).Price();
+
+        const double z95 = 1.959964;
+        Assert.Equal(result.ConfidenceIntervalWidth, 2.0 * z95 * result.StandardError, precision: 10);
+    }
+
+    // ── Parametric GK sweep ───────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData(0.80, 1.10, 1.0,  0.15, 0.05, 0.02, true,  "OTM call deep")]
+    [InlineData(1.30, 1.10, 1.0,  0.15, 0.05, 0.02, true,  "ITM call deep")]
+    [InlineData(1.10, 1.10, 0.25, 0.20, 0.03, 0.01, true,  "ATM call short T")]
+    [InlineData(1.10, 1.10, 2.0,  0.20, 0.04, 0.02, false, "ATM put long T")]
+    [InlineData(1.10, 1.10, 1.0,  0.30, 0.00, 0.00, true,  "High vol, zero rates")]
+    [InlineData(1.10, 1.10, 1.0,  0.20, 0.05, 0.07, true,  "Negative carry (rf > rd)")]
+    public void ParametricSweep_MatchesGarmanKohlhagen(
+        double spot, double strike, double expiry, double sigma,
+        double rd, double rf, bool isCall, string _)
+    {
+        var (mc, gk) = RunAndCompare(spot, strike, expiry, sigma, rd, rf, isCall);
+        AssertWithinMcBounds(mc, gk, sigma: 5.0);
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────────────────
+
+    private (PricingResult mc, double gk) RunAndCompare(
+        double spot, double strike, double expiry, double sigma,
+        double rd, double rf, bool isCall)
+    {
+        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        return RunAndCompareWithCube(spot, strike, expiry, sigma, rd, rf, isCall, cube);
+    }
+
+    private (PricingResult mc, double gk) RunAndCompareWithCube(
+        double spot, double strike, double expiry, double sigma,
+        double rd, double rf, bool isCall, SimulationCube cube)
+    {
+        var mc = BuildPricer(spot, strike, expiry, sigma, rd, rf, isCall, cube).Price();
+        var gk = GarmanKohlhagen.Price(spot, strike, expiry, sigma, rd, rf, isCall);
+        return (mc, gk);
+    }
+
+    private static FXVanillaOptionMCPricer BuildPricer(
+        double spot, double strike, double expiry, double sigma,
+        double rd, double rf, bool isCall, SimulationCube cube)
+    {
+        var option = new Option
+        {
+            Underlying    = "EURUSD",
+            Strike        = strike,
+            ExpiryYears   = expiry,
+            OptionType    = isCall ? OptionType.Call : OptionType.Put,
+            ExerciseStyle = ExerciseStyle.European,
+            Vanilla       = new VanillaOption()
+        };
+        var market = MakeMarket(spot, rd, rf);
+        return new FXVanillaOptionMCPricer(option, ValuationDate, market, sigma, cube);
+    }
+
+    private static FxMarketData MakeMarket(double spot, double rd, double rf) =>
+        new()
+        {
+            CurrencyPair  = "EURUSD",
+            Spot          = spot,
+            DomesticRate  = ZeroCurve.Flat(rd, CurveMaturity),
+            ForeignRate   = ZeroCurve.Flat(rf, CurveMaturity),
+            VolSurface    = new VolatilitySurface()   // empty surface — flat vol passed separately
+        };
+
+    private static void AssertWithinMcBounds(PricingResult mc, double analytical, double sigma)
+    {
+        var tolerance = sigma * mc.StandardError;
+        Assert.True(
+            Math.Abs(mc.Price - analytical) < tolerance,
+            $"MC={mc.Price:F6}  Analytical={analytical:F6}  " +
+            $"Diff={Math.Abs(mc.Price - analytical):F6}  " +
+            $"{sigma}σ tol={tolerance:F6}  SE={mc.StandardError:F6}");
+    }
+}
+
+/// <summary>
+/// MCBasePricer subclass whose SimulatePath sleeps for a fixed duration.
+/// Used to make pricing wall-clock time hardware-independent in cancellation
+/// tests, so CancellationTokenSource.CancelAfter fires reliably before
+/// all paths complete regardless of machine speed.
+/// </summary>
+file sealed class SlowMCPricer : MCBasePricer
+{
+    public SlowMCPricer(int paths)
+        : base(SimulationCube.GenerateIndependent(paths, steps: 1, assets: 1, seed: 0)) { }
+
+    protected override double SimulatePath(int pathIndex)
+    {
+        Thread.Sleep(millisecondsTimeout: 1);
+        return 0.0;
+    }
+}

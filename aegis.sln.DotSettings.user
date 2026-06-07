@@ -1,0 +1,11 @@
+﻿<wpf:ResourceDictionary xml:space="preserve" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:s="clr-namespace:System;assembly=mscorlib" xmlns:ss="urn:shemas-jetbrains-com:settings-storage-xaml" xmlns:wpf="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
+	<s:String x:Key="/Default/Environment/UnitTesting/UnitTestSessionStore/Sessions/=5a96a236_002D32e3_002D450d_002D9325_002D45d6898ae610/@EntryIndexedValue">&lt;SessionState ContinuousTestingMode="0" IsActive="True" Name="SimulationCubeTests" xmlns="urn:schemas-jetbrains-com:jetbrains-ut-session"&gt;
+  &lt;TestAncestor&gt;
+    &lt;TestId&gt;xUnit::D90E617D-A1A8-43A6-AD5E-9B7AEF99DDF3::net10.0::montecarlo.Tests.SimulationCubeTests&lt;/TestId&gt;
+    &lt;TestId&gt;xUnit::D90E617D-A1A8-43A6-AD5E-9B7AEF99DDF3::net10.0::montecarlo.Tests.SobolTests&lt;/TestId&gt;
+    &lt;TestId&gt;xUnit::0461ADDB-6794-42D7-A3EA-F82EFF106DC8::net10.0::MCPricer.Tests.FXVanillaOptionMCPricerTests&lt;/TestId&gt;
+    &lt;TestId&gt;xUnit::0461ADDB-6794-42D7-A3EA-F82EFF106DC8::net10.0::MCPricer.Tests.FXBasketVanillaMCPricerTests.ZeroVol_TwoLegs_WeightedSum_PricesAtExactDiscountedIntrinsic&lt;/TestId&gt;
+    &lt;TestId&gt;xUnit::0461ADDB-6794-42D7-A3EA-F82EFF106DC8::net10.0::MCPricer.Tests.FXBasketVanillaMCPricerTests.EqualWeights_WorstOf_LessOrEqual_BestOf_LessOrEqual_WeightedSum&lt;/TestId&gt;
+    &lt;TestId&gt;xUnit::0461ADDB-6794-42D7-A3EA-F82EFF106DC8::net10.0::MCPricer.Tests.FXSABRVanillaOptionMCPricerTests.ZeroVolOfVol_Beta1_AtmCall_MatchesGarmanKohlhagen&lt;/TestId&gt;
+  &lt;/TestAncestor&gt;
+&lt;/SessionState&gt;</s:String></wpf:ResourceDictionary>

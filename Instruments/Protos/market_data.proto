@@ -1,0 +1,113 @@
+syntax = "proto3";
+
+package aegis.market_data.v1;
+
+option csharp_namespace = "Aegis.Instruments";
+
+// ── Market data hierarchy ───────────────────────────────────────────────────
+//
+//  MarketData
+//    ├── FxMarketData   (Garman-Kohlhagen inputs: spot, dom/for rates, vol surface)
+//    ├── EqMarketData   (Black-Scholes inputs: spot, risk-free rate, div yield, vol surface)
+//    └── IrMarketData   (interest rate curves: discount + forward)
+//
+// All rate fields use continuous compounding (Act/365 or model convention).
+// ───────────────────────────────────────────────────────────────────────────
+
+// Discriminated union of asset-class-specific market data snapshots.
+message MarketData {
+  string as_of = 1;  // ISO-8601 valuation date, e.g. "2026-06-06"
+
+  oneof kind {
+    FxMarketData fx = 10;
+    EqMarketData eq = 11;
+    IrMarketData ir = 12;
+  }
+}
+
+message Pillar{
+  string date = 1;  // ISO-8601, e.g. "2026-06-06"
+  double value = 2;  // continuously compounded zero rate, e.g. 0
+}
+message Pillars{
+  repeated Pillar pillar = 1;
+}
+
+// FX market data (Garman-Kohlhagen model inputs).
+// Convention: S = domestic price of 1 unit of foreign currency.
+// Under domestic risk-neutral measure: dS/S = (r_d - r_f) dt + σ dW.
+//
+// domestic_rate / foreign_rate are zero-rate term structures (Pillars), not
+// flat scalars: each pricer interpolates the curve at the option's expiry to
+// obtain a single effective continuously-compounded rate r(T), then proceeds
+// exactly as it would with a flat rate (drift, diffusion, discounting). This
+// lets callers supply real curves while keeping the simulated process a flat
+// GBM over [0, T] — see ZeroCurve.InterpolateRate.
+message FxMarketData {
+  string            currency_pair = 1;  // e.g. "EURUSD" (1 EUR = spot USD)
+  double            spot          = 2;  // spot rate (domestic per foreign)
+  Pillars           domestic_rate = 3;  // domestic zero-rate curve, e.g. flat 0.05
+  Pillars           foreign_rate  = 4;  // foreign zero-rate curve, e.g. flat 0.03
+  VolatilitySurface vol_surface   = 5;
+}
+
+// Equity market data (Black-Scholes / GBM model inputs).
+// Under risk-neutral measure: dS/S = (r - q) dt + σ dW.
+//
+// risk_free_rate / dividend_yield are term structures (Pillars): each pricer
+// interpolates the curve at the option's expiry to obtain a single effective
+// continuously-compounded rate / yield r(T), q(T) — see ZeroCurve.InterpolateRate.
+message EqMarketData {
+  string            ticker         = 1;  // e.g. "SPX", "AAPL"
+  double            spot           = 2;  // current price
+  Pillars           risk_free_rate = 3;  // risk-free zero-rate curve
+  Pillars           dividend_yield = 4;  // continuous dividend-yield curve
+  VolatilitySurface vol_surface    = 5;
+}
+
+// Interest rate market data.
+message IrMarketData {
+  string     currency       = 1;  // e.g. "USD"
+  YieldCurve discount_curve = 2;  // OIS / risk-free discount curve
+  YieldCurve forward_curve  = 3;  // IBOR / projection curve
+}
+
+// Implied volatility surface stored as a flat strike × expiry grid.
+//
+// Layout (row-major): implied_vols[i * len(expiry_years) + j] = σ(strikes[i], expiry_years[j])
+//
+// For interpolation, use bilinear interpolation in (strike, expiry) space.
+// Extrapolation beyond the grid is flat (nearest edge vol).
+message VolatilitySurface {
+  repeated double strikes      = 1;  // absolute strike levels, strictly increasing
+  repeated double expiry_years = 2;  // maturities in years, strictly increasing
+  repeated double implied_vols = 3;  // len = len(strikes) × len(expiry_years)
+}
+
+// Zero-rate yield curve (bootstrapped or stripped from market instruments).
+message YieldCurve {
+  string          name       = 1;  // e.g. "USD.OIS", "EUR.EURIBOR6M"
+  repeated double maturities = 2;  // in years, strictly increasing
+  repeated double rates      = 3;  // continuously compounded zero rates
+}
+
+// SABR stochastic volatility model parameters (Hagan et al. 2002).
+//
+// Model under the T-forward measure Q^T:
+//   dF  = σ · F^β · dW₁                 (F = forward, martingale under Q^T)
+//   dσ  = ν · σ · dW₂                   (lognormal vol-of-vol)
+//   dW₁·dW₂ = ρ dt
+//
+// Special cases:
+//   β = 0 → normal SABR (F can be negative; use for rates)
+//   β = 1 → lognormal SABR (structurally identical to Black-Scholes with stochastic vol)
+//   ν = 0 → constant vol (reduces to GBM / Garman-Kohlhagen)
+//
+// Calibration target: implied vol smile quotes from market (calls and puts
+// across strikes). Use Hagan ATM formula plus backbone for initial guess.
+message SabrParameters {
+  double alpha = 1;  // σ₀: initial vol level; strictly positive
+  double beta  = 2;  // CEV exponent; ∈ [0, 1]
+  double rho   = 3;  // Brownian correlation between F and σ; ∈ (−1, 1)
+  double nu    = 4;  // vol-of-vol; ≥ 0
+}

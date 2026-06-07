@@ -1,0 +1,88 @@
+{
+  "_note": [
+    "Daily settlement prices for Eurex bond futures options (OGBL = options on RX Euro-Bund,",
+    "OGBS = options on DU Euro-Schatz). Used to build vol surfaces for normal-SABR calibration.",
+    "Ticker format: {FUTURE}-{YYYYMM}-{C|P}-{STRIKE}",
+    "Provider 'eurex' is a placeholder — implement an IMarketDataProvider backed by",
+    "Interactive Brokers TWS API, Bloomberg BDP, or a direct Eurex market-data feed."
+  ],
+
+  "interval": "1d",
+  "provider": "eurex",
+
+  "jobs": [
+
+    { "_note": "─── RX (Euro-Bund futures, OGBL) ─── ATM ~ 131, step 1.0 ───────────────" },
+
+    { "_note": "Sep 2026 expiry — nearest quarterly, highest liquidity" },
+    { "ticker": "RX-202609-P-127.00", "from": "2025-09-01T00:00:00Z" },
+    { "ticker": "RX-202609-P-128.00", "from": "2025-09-01T00:00:00Z" },
+    { "ticker": "RX-202609-P-129.00", "from": "2025-09-01T00:00:00Z" },
+    { "ticker": "RX-202609-P-130.00", "from": "2025-09-01T00:00:00Z" },
+    { "ticker": "RX-202609-C-131.00", "from": "2025-09-01T00:00:00Z" },
+    { "ticker": "RX-202609-C-132.00", "from": "2025-09-01T00:00:00Z" },
+    { "ticker": "RX-202609-C-133.00", "from": "2025-09-01T00:00:00Z" },
+    { "ticker": "RX-202609-C-134.00", "from": "2025-09-01T00:00:00Z" },
+    { "ticker": "RX-202609-C-135.00", "from": "2025-09-01T00:00:00Z" },
+
+    { "_note": "Dec 2026 expiry" },
+    { "ticker": "RX-202612-P-127.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "RX-202612-P-128.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "RX-202612-P-129.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "RX-202612-P-130.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "RX-202612-C-131.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "RX-202612-C-132.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "RX-202612-C-133.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "RX-202612-C-134.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "RX-202612-C-135.00", "from": "2025-06-01T00:00:00Z" },
+
+    { "_note": "Mar 2027 expiry — for term structure and longer-dated SABR calibration" },
+    { "ticker": "RX-202703-P-127.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "RX-202703-P-128.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "RX-202703-P-129.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "RX-202703-P-130.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "RX-202703-C-131.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "RX-202703-C-132.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "RX-202703-C-133.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "RX-202703-C-134.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "RX-202703-C-135.00", "from": "2025-06-01T00:00:00Z" },
+
+    { "_note": "─── DU (Euro-Schatz futures, OGBS) ─── ATM ~ 107.5, step 0.5 ──────────" },
+
+    { "_note": "Sep 2026 expiry" },
+    { "ticker": "DU-202609-P-105.50", "from": "2025-09-01T00:00:00Z" },
+    { "ticker": "DU-202609-P-106.00", "from": "2025-09-01T00:00:00Z" },
+    { "ticker": "DU-202609-P-106.50", "from": "2025-09-01T00:00:00Z" },
+    { "ticker": "DU-202609-P-107.00", "from": "2025-09-01T00:00:00Z" },
+    { "ticker": "DU-202609-C-107.50", "from": "2025-09-01T00:00:00Z" },
+    { "ticker": "DU-202609-C-108.00", "from": "2025-09-01T00:00:00Z" },
+    { "ticker": "DU-202609-C-108.50", "from": "2025-09-01T00:00:00Z" },
+    { "ticker": "DU-202609-C-109.00", "from": "2025-09-01T00:00:00Z" },
+    { "ticker": "DU-202609-C-109.50", "from": "2025-09-01T00:00:00Z" },
+
+    { "_note": "Dec 2026 expiry" },
+    { "ticker": "DU-202612-P-105.50", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "DU-202612-P-106.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "DU-202612-P-106.50", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "DU-202612-P-107.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "DU-202612-C-107.50", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "DU-202612-C-108.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "DU-202612-C-108.50", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "DU-202612-C-109.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "DU-202612-C-109.50", "from": "2025-06-01T00:00:00Z" },
+
+    { "_note": "Mar 2027 expiry" },
+    { "ticker": "DU-202703-P-105.50", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "DU-202703-P-106.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "DU-202703-P-106.50", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "DU-202703-P-107.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "DU-202703-C-107.50", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "DU-202703-C-108.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "DU-202703-C-108.50", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "DU-202703-C-109.00", "from": "2025-06-01T00:00:00Z" },
+    { "ticker": "DU-202703-C-109.50", "from": "2025-06-01T00:00:00Z" }
+
+  ],
+
+  "to": "2026-06-04T23:59:59Z"
+}

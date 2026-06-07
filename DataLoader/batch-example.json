@@ -1,0 +1,12 @@
+{
+  "from": "2024-01-01T00:00:00Z",
+  "to":   "2026-06-04T23:59:59Z",
+  "jobs": [
+    { "ticker": "EURUSD=X", "interval": "1d",  "provider": "yahoo" },
+    { "ticker": "GBPUSD=X", "interval": "1d",  "provider": "yahoo" },
+    { "ticker": "USDJPY=X", "interval": "1d",  "provider": "yahoo" },
+    { "ticker": "AUDUSD=X", "interval": "1d",  "provider": "yahoo" },
+    { "ticker": "EURUSD=X", "interval": "1d",  "provider": "yahoo" },
+    { "ticker": "GBPUSD=X", "interval": "1d",  "provider": "yahoo" }
+  ]
+}

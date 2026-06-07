@@ -1,0 +1,188 @@
+syntax = "proto3";
+
+package aegis.instruments.v1;
+
+option csharp_namespace = "Aegis.Instruments";
+
+// ── Hierarchy overview ──────────────────────────────────────────────────────
+//
+//  Instrument   (id, trade_date, currency)
+//    └── Option (underlying, strike, expiry, put/call, exercise style)
+//          ├── VanillaOption   (European plain call/put — no extra fields)
+//          └── BarrierOption   (single-barrier, knock-in or knock-out)
+//                ├── FXBarrierOption   (domestic / foreign currency metadata)
+//                └── EQBarrierOption   (equity ticker / exchange metadata)
+//
+// Protobuf has no native inheritance. Hierarchy is expressed via nested
+// `oneof` fields. Each message embeds the "base class" fields directly and
+// uses a `oneof` for the "derived class" discriminant.
+//
+// Typical C# access pattern:
+//   if (instrument.KindCase == Instrument.KindOneofCase.Option) {
+//     var opt = instrument.Option;
+//     if (opt.KindCase == Option.KindOneofCase.Barrier) {
+//       var b = opt.Barrier;
+//       if (b.UnderlyingKindCase == BarrierOption.UnderlyingKindOneofCase.Fx) { ... }
+//     }
+//   }
+// ───────────────────────────────────────────────────────────────────────────
+
+// Top-level wrapper for any tradeable instrument.
+message Instrument {
+  string instrument_id = 1;   // unique trade / instrument identifier
+  string trade_date    = 2;   // ISO-8601, e.g. "2026-06-06"
+  string currency      = 3;   // settlement currency, e.g. "USD"
+
+  oneof kind {
+    Option option = 10;
+    // Bond bond = 11;   // future
+    // Swap swap = 12;   // future
+  }
+}
+message CurrencyPair {
+  string base_currency  = 1;  // e.g. "EUR"
+  string quote_currency = 2;  // e.g. "USD"
+}
+enum BasketAggregationMethod {
+  BASKET_AGGREGATION_METHOD_UNSPECIFIED = 0;
+  BASKET_AGGREGATION_METHOD_BEST_OF         = 1;  // Best-of: max/min (call/put) (weight_i * spot_i) across all underlyings
+  BASKET_AGGREGATION_METHOD_WORST_OF     = 2;  // worst-of: min/max (call/put)(weight_i * spot_i) across all underlyings
+  BASKET_AGGREGATION_METHOD_WEIGHTED_SUM     = 3;  // weighted product of underlying spot levels
+}
+// A basket combines several underlyings (identified by name, e.g. an FX
+// currency pair "EURUSD" or an equity ticker "AAPL") into a single payoff
+// via one of the BasketAggregationMethod strategies.
+//
+// Market data and volatilities for each leg are supplied separately to the
+// pricer (baskets carry no embedded MarketData) — underlying_to_weight only
+// fixes the basket composition and portfolio weights.
+message Basket {
+  // Maps underlying identifier (e.g. FX currency pair "EURUSD") → portfolio
+  // weight w_i. The map's keys are the single source of truth for basket
+  // composition: the pricer requires market data and volatility for every
+  // key present here, and rejects extra/missing legs. Must be non-empty.
+  map<string, double> underlying_to_weight = 1;
+  BasketAggregationMethod aggregation_method = 2;
+}
+
+// Fields shared by all option types.
+message Option {
+  oneof underlying_kind{
+      Basket basket = 1;
+      string        underlying     = 2;  // e.g. "EURUSD", "SPX", "AAPL"
+  }
+  
+  double        strike         = 3;  // absolute strike level
+  double        expiry_years   = 4;  // time to expiry in years (Act/365 or model convention)
+  OptionType    option_type    = 5;
+  ExerciseStyle exercise_style = 6;
+
+  oneof kind {
+    VanillaOption vanilla = 10;
+    BarrierOption barrier = 11;
+    DigitalOption digital = 12;
+    AsianOption   asian   = 13;
+  }
+}
+
+// European vanilla option — no additional fields beyond Option base.
+message VanillaOption {}
+
+// Binary / digital ("cash-or-nothing" / "asset-or-nothing") option.
+//
+// In-the-money condition is defined by the base Option's strike/option_type,
+// exactly as for a vanilla option: call ⇒ S(T) > K, put ⇒ S(T) < K.
+//
+//   CASH_OR_NOTHING  payoff = payout · 1{S(T) ITM}
+//   ASSET_OR_NOTHING payoff = S(T)   · 1{S(T) ITM}
+message DigitalOption {
+  double                payout          = 1;  // fixed cash amount Q; used only when settlement_type = CASH_OR_NOTHING
+  DigitalSettlementType settlement_type = 2;
+}
+
+// Asian (average-rate / average-strike) option.
+//
+// The average Ā is taken over the simulated monitoring path
+// S(t_1), …, S(t_n) (the MC pricer's time steps), using either an
+// arithmetic or geometric mean:
+//
+//   AVERAGE_PRICE   payoff = max(φ·(Ā      − K), 0)   fixed strike K, averaged underlying
+//   AVERAGE_STRIKE  payoff = max(φ·(S(T)   − Ā), 0)   floating strike = average; base Option.strike is unused
+message AsianOption {
+  AsianAveragingMethod averaging_method = 1;
+  AsianStrikeStyle     strike_style     = 2;
+}
+
+// Single-barrier (knock-in or knock-out) option.
+message BarrierOption {
+  double             barrier_level = 1;  // absolute barrier level
+  BarrierType        barrier_type  = 2;
+  BarrierObservation observation   = 3;
+  double             rebate        = 4;  // cash paid on expiry when barrier extinguishes the option
+
+  // Asset-class-specific metadata (FX vs equity).
+  oneof underlying_kind {
+    FXBarrierOption fx = 10;
+    EQBarrierOption eq = 11;
+  }
+}
+
+// FX-specific barrier option metadata.
+message FXBarrierOption {
+  string domestic_currency = 1;  // e.g. "USD"
+  string foreign_currency  = 2;  // e.g. "EUR"
+}
+
+// Equity-specific barrier option metadata.
+message EQBarrierOption {
+  string ticker   = 1;  // e.g. "AAPL"
+  string exchange = 2;  // e.g. "NASDAQ"
+}
+
+// ── Enumerations ────────────────────────────────────────────────────────────
+// Proto3 requires the first value = 0 (the default "unspecified" sentinel).
+// C# names: UPPER_SNAKE_CASE → PascalCase, e.g. OPTION_TYPE_CALL → OptionTypeCall.
+
+enum OptionType {
+  OPTION_TYPE_UNSPECIFIED = 0;
+  OPTION_TYPE_CALL        = 1;
+  OPTION_TYPE_PUT         = 2;
+}
+
+enum ExerciseStyle {
+  EXERCISE_STYLE_UNSPECIFIED = 0;
+  EXERCISE_STYLE_EUROPEAN    = 1;  // payoff depends only on terminal value
+  EXERCISE_STYLE_AMERICAN    = 2;  // early exercise; requires LSM or tree — MC path-based
+}
+
+enum BarrierType {
+  BARRIER_TYPE_UNSPECIFIED  = 0;
+  BARRIER_TYPE_UP_AND_IN    = 1;  // activated when spot crosses barrier upward
+  BARRIER_TYPE_UP_AND_OUT   = 2;  // extinguished when spot crosses barrier upward
+  BARRIER_TYPE_DOWN_AND_IN  = 3;  // activated when spot crosses barrier downward
+  BARRIER_TYPE_DOWN_AND_OUT = 4;  // extinguished when spot crosses barrier downward
+}
+
+enum BarrierObservation {
+  BARRIER_OBSERVATION_UNSPECIFIED = 0;
+  BARRIER_OBSERVATION_CONTINUOUS  = 1;  // Brownian bridge correction applied at each MC step
+  BARRIER_OBSERVATION_DISCRETE    = 2;  // barrier checked only at MC monitoring dates
+}
+
+enum DigitalSettlementType {
+  DIGITAL_SETTLEMENT_TYPE_UNSPECIFIED  = 0;
+  DIGITAL_SETTLEMENT_TYPE_CASH_OR_NOTHING  = 1;  // pays a fixed cash amount Q when ITM at expiry
+  DIGITAL_SETTLEMENT_TYPE_ASSET_OR_NOTHING = 2;  // pays the underlying spot S(T) when ITM at expiry
+}
+
+enum AsianAveragingMethod {
+  ASIAN_AVERAGING_METHOD_UNSPECIFIED = 0;
+  ASIAN_AVERAGING_METHOD_ARITHMETIC  = 1;  // Ā = (1/n)·Σ S(t_i)               — no closed-form price; MC/approximation only
+  ASIAN_AVERAGING_METHOD_GEOMETRIC   = 2;  // Ā = exp((1/n)·Σ log S(t_i))      — Kemna-Vorst closed form available
+}
+
+enum AsianStrikeStyle {
+  ASIAN_STRIKE_STYLE_UNSPECIFIED    = 0;
+  ASIAN_STRIKE_STYLE_AVERAGE_PRICE  = 1;  // fixed strike K compared to the average:    max(φ·(Ā − K), 0)
+  ASIAN_STRIKE_STYLE_AVERAGE_STRIKE = 2;  // floating strike = average compared to S(T): max(φ·(S(T) − Ā), 0)
+}
