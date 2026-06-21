@@ -1,0 +1,10 @@
+<Solution>
+  <Project Path="aegis/aegis.csproj" />
+  <Project Path="AnalyticalPricers/AnalyticalPricers.csproj" />
+  <Project Path="DataLoader/DataLoader.csproj" />
+  <Project Path="Instruments/Instruments.csproj" />
+  <Project Path="MCPricer/MCPricer.csproj" />
+  <Project Path="MCPricer.Tests/MCPricer.Tests.csproj" />
+  <Project Path="montecarlo.Tests/montecarlo.Tests.csproj" />
+  <Project Path="RandomSimulator/RandomSimulator.csproj" />
+</Solution>
