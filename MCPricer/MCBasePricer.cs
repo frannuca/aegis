@@ -1,3 +1,4 @@
+using Aegis.Instruments;
 using RandomSimulator;
 
 namespace MCPricer;
@@ -63,6 +64,24 @@ public abstract class MCBasePricer : IDisposable
     /// For non-blocking execution use PriceAsync.
     /// </summary>
     public PricingResult Price() => RunParallel(CancellationToken.None);
+
+    /// <summary>
+    /// Prices the instrument using the supplied market data snapshot.
+    /// Override in derived classes; the base implementation throws NotSupportedException.
+    /// </summary>
+    public virtual PricingResult Price(IMarketData market)
+        => throw new NotSupportedException(
+            $"{GetType().Name} does not support Price(IMarketData). " +
+            "Call the type-specific Price overload instead.");
+
+    /// <summary>
+    /// Prices the instrument asynchronously using the supplied market data snapshot.
+    /// Override in derived classes; the base implementation throws NotSupportedException.
+    /// </summary>
+    public virtual Task<PricingResult> PriceAsync(IMarketData market, CancellationToken ct = default)
+        => throw new NotSupportedException(
+            $"{GetType().Name} does not support PriceAsync(IMarketData). " +
+            "Call the type-specific PriceAsync overload instead.");
 
     /// <summary>
     /// Prices the instrument asynchronously. Offloads the parallel path

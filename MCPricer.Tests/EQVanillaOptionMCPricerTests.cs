@@ -2,6 +2,7 @@ using Aegis.Instruments;
 using AnalyticalPricers;
 using MCPricer.Equity;
 using RandomSimulator;
+using NodaTime;
 
 namespace MCPricer.Tests;
 
@@ -39,8 +40,8 @@ public sealed class EQVanillaOptionMCPricerTests
     // at the option's expiry from this valuation date — see ZeroCurve.InterpolateRate.
     // Tests use single-pillar "flat" curves so the interpolated rate equals the scalar
     // reference rate (R, Q) regardless of T, keeping the Black-Scholes comparison exact.
-    private static readonly DateOnly ValuationDate = new(2026, 1, 1);
-    private static readonly DateOnly CurveMaturity = new(2036, 1, 1);
+    private static readonly LocalDate ValuationDate = new(2026, 1, 1);
+    private static readonly LocalDate CurveMaturity = new(2036, 1, 1);
 
     private const int Paths       = 100_000;
     private const int Steps       = 1;        // single step suffices for European payoffs
@@ -135,9 +136,10 @@ public sealed class EQVanillaOptionMCPricerTests
     [InlineData(120.0, "OTM call / ITM put")]
     public void PutCallParity_HoldsWithinMcNoise(double strike, string _)
     {
-        var cube  = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var call  = BuildPricer(S0, strike, T, Sigma, R, Q, isCall: true,  cube).Price();
-        var put   = BuildPricer(S0, strike, T, Sigma, R, Q, isCall: false, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, R, Q);
+        var call   = BuildPricer(S0, strike, T, Sigma, R, Q, isCall: true,  cube).Price(market);
+        var put    = BuildPricer(S0, strike, T, Sigma, R, Q, isCall: false, cube).Price(market);
 
         var mcParity         = call.Price - put.Price;
         var analyticalParity = S0 * Math.Exp(-Q * T) - strike * Math.Exp(-R * T);
@@ -156,8 +158,9 @@ public sealed class EQVanillaOptionMCPricerTests
         var forward  = S0 * Math.Exp((R - Q) * T);
         var expected = Math.Exp(-R * T) * Math.Max(forward - K, 0.0);
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildPricer(S0, K, T, sigma: 0.0, R, Q, isCall: true, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, R, Q);
+        var mc     = BuildPricer(S0, K, T, sigma: 0.0, R, Q, isCall: true, cube).Price(market);
 
         Assert.Equal(expected, mc.Price, precision: 10);
     }
@@ -169,8 +172,9 @@ public sealed class EQVanillaOptionMCPricerTests
         var forward = S0 * Math.Exp((R - Q) * T);
         Assert.True(forward < 120.0, "Precondition: forward must be below 120 for this test");
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildPricer(S0, strike: 120.0, T, sigma: 0.0, R, Q, isCall: true, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, R, Q);
+        var mc     = BuildPricer(S0, strike: 120.0, T, sigma: 0.0, R, Q, isCall: true, cube).Price(market);
 
         Assert.Equal(0.0, mc.Price, precision: 10);
     }
@@ -181,8 +185,9 @@ public sealed class EQVanillaOptionMCPricerTests
         // BS with σ→0 equals discounted intrinsic; MC with σ=0 should agree
         const double tinyVol = 1e-8;
         var bs   = BlackScholes.Price(S0, K, T, tinyVol, R, Q, isCall: true);
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildPricer(S0, K, T, sigma: 0.0, R, Q, isCall: true, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, R, Q);
+        var mc     = BuildPricer(S0, K, T, sigma: 0.0, R, Q, isCall: true, cube).Price(market);
 
         Assert.Equal(bs, mc.Price, precision: 6);
     }
@@ -196,8 +201,9 @@ public sealed class EQVanillaOptionMCPricerTests
         var cubeNo = SimulationCube.GenerateIndependent(halfPaths * 2, 1, 1, seed: 7, useAntithetics: false);
         var cubeAV = SimulationCube.GenerateIndependent(halfPaths * 2, 1, 1, seed: 7, useAntithetics: true);
 
-        var seNo = BuildPricer(S0, K, T, Sigma, R, Q, true, cubeNo).Price().StandardError;
-        var seAV = BuildPricer(S0, K, T, Sigma, R, Q, true, cubeAV).Price().StandardError;
+        var market = MakeMarket(S0, R, Q);
+        var seNo   = BuildPricer(S0, K, T, Sigma, R, Q, true, cubeNo).Price(market).StandardError;
+        var seAV   = BuildPricer(S0, K, T, Sigma, R, Q, true, cubeAV).Price(market).StandardError;
 
         Assert.True(seAV < seNo, $"Antithetic SE {seAV:F6} must be < plain SE {seNo:F6}");
     }
@@ -212,9 +218,10 @@ public sealed class EQVanillaOptionMCPricerTests
         var d1    = (Math.Log(S0 / K) + (R - Q + 0.5 * Sigma * Sigma) * T) / (Sigma * sqrtT);
         var analyticalDelta = Math.Exp(-Q * T) * NormalDistribution.Cdf(d1);
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, R, Q);
         using var pricer = BuildPricer(S0, K, T, Sigma, R, Q, isCall: true, cube);
-        var greeks = pricer.ComputeGreeks(spotEps: 1.0);   // spot units are ~100, so eps=1 is 1%
+        var greeks = pricer.ComputeGreeks(market, spotEps: 1.0);   // spot units are ~100, so eps=1 is 1%
 
         Assert.True(Math.Abs(greeks.Delta - analyticalDelta) < 0.01,
             $"MC delta={greeks.Delta:F4}  Analytical={analyticalDelta:F4}");
@@ -229,9 +236,10 @@ public sealed class EQVanillaOptionMCPricerTests
         var nprime = NormalDistribution.Pdf(d1);
         var analyticalVega = S0 * Math.Exp(-Q * T) * nprime * sqrtT;
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, R, Q);
         using var pricer = BuildPricer(S0, K, T, Sigma, R, Q, isCall: true, cube);
-        var greeks = pricer.ComputeGreeks(volEps: 0.001);
+        var greeks = pricer.ComputeGreeks(market, volEps: 0.001);
 
         Assert.True(Math.Abs(greeks.Vega - analyticalVega) < 1.0,   // vega units ≈ 40 for S0=100
             $"MC vega={greeks.Vega:F4}  Analytical={analyticalVega:F4}");
@@ -241,9 +249,10 @@ public sealed class EQVanillaOptionMCPricerTests
     public void Greeks_Theta_IsNaN()
     {
         // Theta cannot be computed via cube bump; must be NaN
-        var cube = SimulationCube.GenerateIndependent(1_000, Steps, 1, DefaultSeed);
+        var cube   = SimulationCube.GenerateIndependent(1_000, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, R, Q);
         using var pricer = BuildPricer(S0, K, T, Sigma, R, Q, isCall: true, cube);
-        var greeks = pricer.ComputeGreeks();
+        var greeks = pricer.ComputeGreeks(market);
 
         Assert.True(double.IsNaN(greeks.Theta));
     }
@@ -252,12 +261,13 @@ public sealed class EQVanillaOptionMCPricerTests
     public void Greeks_PutCallParityInDelta()
     {
         // Call_delta - Put_delta = e^{-q·T}  (model-free parity)
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var cube     = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market   = MakeMarket(S0, R, Q);
         using var callPricer = BuildPricer(S0, K, T, Sigma, R, Q, isCall: true,  cube);
         using var putPricer  = BuildPricer(S0, K, T, Sigma, R, Q, isCall: false, cube);
 
-        var callDelta = callPricer.ComputeGreeks(spotEps: 1.0).Delta;
-        var putDelta  = putPricer.ComputeGreeks(spotEps: 1.0).Delta;
+        var callDelta = callPricer.ComputeGreeks(market, spotEps: 1.0).Delta;
+        var putDelta  = putPricer.ComputeGreeks(market, spotEps: 1.0).Delta;
         var expected  = Math.Exp(-Q * T);
 
         Assert.True(Math.Abs((callDelta - putDelta) - expected) < 0.01,
@@ -300,9 +310,8 @@ public sealed class EQVanillaOptionMCPricerTests
                 Observation  = BarrierObservation.Discrete
             }
         };
-        var market = MakeMarket(S0, R, Q);
         Assert.Throws<ArgumentException>(() =>
-            new EQVanillaOptionMCPricer(barrierOpt, ValuationDate, market, Sigma, cube));
+            new EQVanillaOptionMCPricer(barrierOpt, ValuationDate, Sigma, cube));
     }
 
     // ── Parametric sweep ─────────────────────────────────────────────────────
@@ -328,8 +337,9 @@ public sealed class EQVanillaOptionMCPricerTests
         double spot, double strike, double expiry, double sigma,
         double r, double q, bool isCall)
     {
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildPricer(spot, strike, expiry, sigma, r, q, isCall, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(spot, r, q);
+        var mc     = BuildPricer(spot, strike, expiry, sigma, r, q, isCall, cube).Price(market);
         var bs   = BlackScholes.Price(spot, strike, expiry, sigma, r, q, isCall);
         return (mc, bs);
     }
@@ -347,7 +357,7 @@ public sealed class EQVanillaOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Vanilla       = new VanillaOption()
         };
-        return new EQVanillaOptionMCPricer(option, ValuationDate, MakeMarket(spot, r, q), sigma, cube);
+        return new EQVanillaOptionMCPricer(option, ValuationDate, sigma, cube);
     }
 
     private static EqMarketData MakeMarket(double spot, double r, double q) =>

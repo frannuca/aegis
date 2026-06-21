@@ -1,5 +1,6 @@
 using Aegis.Instruments;
 using RandomSimulator;
+using NodaTime;
 
 namespace MCPricer.FX;
 
@@ -18,14 +19,14 @@ namespace MCPricer.FX;
 ///   For ν = 0:                  SABR reduces to GBM → compare directly to GK.
 ///
 /// ── Greeks ────────────────────────────────────────────────────────────────────
-/// Inherited ComputeGreeks() computes: Delta, Gamma, Vega (= dV/dα), Rho.
+/// Inherited ComputeGreeks(market) computes: Delta, Gamma, Vega (= dV/dα), Rho.
 /// Additional SABR Greeks available via:
-///   ComputeVolOfVolSensitivity() → dV/dν
-///   ComputeCorrelSensitivity()   → dV/dρ (Brownian correlation)
+///   ComputeVolOfVolSensitivity(market) → dV/dν
+///   ComputeCorrelSensitivity(market)   → dV/dρ (Brownian correlation)
 ///
 /// BumpType.VolUp/VolDown maps to bumping α (the SABR initial vol level),
 /// consistent with market convention that "vega" = sensitivity to the
-/// at-the-money vol level.
+/// at-the-money vol level. Spot and rate bumps use ComputeGreeks(IMarketData).
 /// </summary>
 public sealed class FXSABRVanillaOptionMCPricer : FXSABRMCPricer
 {
@@ -34,11 +35,10 @@ public sealed class FXSABRVanillaOptionMCPricer : FXSABRMCPricer
 
     public FXSABRVanillaOptionMCPricer(
         Option          option,
-        DateOnly        valuationDate,
-        FxMarketData    market,
+        LocalDate        valuationDate,
         SabrParameters  sabr,
         SimulationCube  cube)
-        : base(option, valuationDate, market, sabr, cube)
+        : base(option, valuationDate, sabr, cube)
     {
         if (option.Strike <= 0)
             throw new ArgumentException("Strike must be positive.", nameof(option));
@@ -57,39 +57,34 @@ public sealed class FXSABRVanillaOptionMCPricer : FXSABRMCPricer
     }
 
     /// <summary>
-    /// Creates a new pricer with one SABR or market parameter bumped by epsilon,
+    /// Creates a new pricer with one SABR parameter bumped by epsilon,
     /// reusing the same SimulationCube for common-random-number variance reduction.
     ///
     /// BumpType mapping:
-    ///   SpotUp/Down         → Market.Spot  (shifts InitialForward proportionally)
-    ///   VolUp/Down          → Sabr.Alpha   (SABR vega = dV/dα, the ATM vol sensitivity)
-    ///   RateUp/Down         → Market.DomesticRate
-    ///   ForeignRateUp/Down  → Market.ForeignRate
-    ///   SabrNuUp/Down       → Sabr.Nu      (vol-of-vol sensitivity)
-    ///   SabrRhoUp/Down      → Sabr.Rho     (correlation sensitivity; clamped to (−1,1))
+    ///   VolUp/Down     → Sabr.Alpha   (SABR vega = dV/dα, the ATM vol sensitivity)
+    ///   SabrNuUp/Down  → Sabr.Nu      (vol-of-vol sensitivity)
+    ///   SabrRhoUp/Down → Sabr.Rho     (correlation sensitivity; clamped to (−1,1))
+    ///
+    /// Spot and rate bumps are handled by ComputeGreeks(IMarketData market, ...) via
+    /// MarketDataBumps on the same instance — no new pricer needed.
     /// </summary>
     protected override MCBasePricer CreateBumped(BumpType bump, double epsilon)
     {
-        var m    = Market.Clone();
         var sabr = Sabr.Clone();
 
         switch (bump)
         {
-            case BumpType.SpotUp:           m.Spot         += epsilon;                                           break;
-            case BumpType.SpotDown:         m.Spot         -= epsilon;                                           break;
-            case BumpType.VolUp:            sabr.Alpha     += epsilon;                                           break;
-            case BumpType.VolDown:          sabr.Alpha      = Math.Max(1e-8, sabr.Alpha - epsilon);              break;
-            case BumpType.RateUp:           m.DomesticRate  = ZeroCurve.Shift(m.DomesticRate,  epsilon);          break;
-            case BumpType.RateDown:         m.DomesticRate  = ZeroCurve.Shift(m.DomesticRate, -epsilon);          break;
-            case BumpType.ForeignRateUp:    m.ForeignRate   = ZeroCurve.Shift(m.ForeignRate,   epsilon);          break;
-            case BumpType.ForeignRateDown:  m.ForeignRate   = ZeroCurve.Shift(m.ForeignRate,  -epsilon);          break;
-            case BumpType.SabrNuUp:         sabr.Nu        += epsilon;                                           break;
-            case BumpType.SabrNuDown:       sabr.Nu         = Math.Max(0.0, sabr.Nu - epsilon);                  break;
-            case BumpType.SabrRhoUp:        sabr.Rho        = Math.Min(1.0 - 1e-6, sabr.Rho + epsilon);         break;
-            case BumpType.SabrRhoDown:      sabr.Rho        = Math.Max(-1.0 + 1e-6, sabr.Rho - epsilon);        break;
-            default: throw new NotSupportedException($"Bump {bump} not supported by {GetType().Name}.");
+            case BumpType.VolUp:       sabr.Alpha += epsilon;                                        break;
+            case BumpType.VolDown:     sabr.Alpha  = Math.Max(1e-8, sabr.Alpha - epsilon);           break;
+            case BumpType.SabrNuUp:    sabr.Nu    += epsilon;                                        break;
+            case BumpType.SabrNuDown:  sabr.Nu     = Math.Max(0.0, sabr.Nu - epsilon);              break;
+            case BumpType.SabrRhoUp:   sabr.Rho    = Math.Min(1.0 - 1e-6, sabr.Rho + epsilon);     break;
+            case BumpType.SabrRhoDown: sabr.Rho    = Math.Max(-1.0 + 1e-6, sabr.Rho - epsilon);    break;
+            default: throw new NotSupportedException(
+                $"Bump {bump} not supported by {GetType().Name}. " +
+                "Use ComputeGreeks(market, ...) for spot and rate bumps.");
         }
 
-        return new FXSABRVanillaOptionMCPricer(OptionDef, ValuationDate, m, sabr, Cube);
+        return new FXSABRVanillaOptionMCPricer(OptionDef, ValuationDate, sabr, Cube);
     }
 }

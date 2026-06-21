@@ -11,4 +11,8 @@
     <ProjectReference Include="..\Instruments\Instruments.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="NodaTime" Version="3.3.2" />
+  </ItemGroup>
+
 </Project>

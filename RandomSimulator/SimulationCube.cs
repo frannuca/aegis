@@ -154,7 +154,7 @@ public sealed class SimulationCube
         int            assets,
         int            seed           = 42,
         bool           useAntithetics = false,
-        SamplingMethod method         = SamplingMethod.PseudoRandom)
+        SamplingMethod method         = SamplingMethod.QuasiRandom)
     {
         var identity = Identity(assets);
         return Generate(paths, steps, assets, identity, seed, useAntithetics, method);

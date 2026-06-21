@@ -1,5 +1,6 @@
 using Aegis.Instruments;
 using RandomSimulator;
+using NodaTime;
 
 namespace MCPricer.Equity;
 
@@ -32,7 +33,7 @@ namespace MCPricer.Equity;
 ///   σ = 0: the path is deterministic, so Ā collapses to the (single) realized
 ///   deterministic average and the payoff is exact intrinsic value.
 /// </summary>
-public sealed class EQAsianOptionMCPricer : EQMCPricer
+public sealed class EQAsianOptionMCPricer : GbmOptionMCPricer
 {
     private readonly double               _strike;
     private readonly double               _phi;   // +1 for call, −1 for put
@@ -41,11 +42,10 @@ public sealed class EQAsianOptionMCPricer : EQMCPricer
 
     public EQAsianOptionMCPricer(
         Option         option,
-        DateOnly       valuationDate,
-        EqMarketData   market,
+        LocalDate       valuationDate,
         double         volatility,
         SimulationCube cube)
-        : base(option, valuationDate, market, volatility, cube)
+        : base(option, valuationDate, volatility, cube)
     {
         if (option.KindCase != Option.KindOneofCase.Asian)
             throw new ArgumentException("Option.Kind must be Asian.", nameof(option));
@@ -91,20 +91,13 @@ public sealed class EQAsianOptionMCPricer : EQMCPricer
 
     protected override MCBasePricer CreateBumped(BumpType bump, double epsilon)
     {
-        var m   = Market.Clone();
         var vol = Volatility;
         switch (bump)
         {
-            case BumpType.SpotUp:             m.Spot          += epsilon;                         break;
-            case BumpType.SpotDown:           m.Spot          -= epsilon;                         break;
-            case BumpType.VolUp:              vol             += epsilon;                         break;
-            case BumpType.VolDown:            vol              = Math.Max(0.0, vol - epsilon);    break;
-            case BumpType.RateUp:             m.RiskFreeRate  = ZeroCurve.Shift(m.RiskFreeRate,   epsilon);  break;
-            case BumpType.RateDown:           m.RiskFreeRate  = ZeroCurve.Shift(m.RiskFreeRate,  -epsilon);  break;
-            case BumpType.DividendYieldUp:    m.DividendYield = ZeroCurve.Shift(m.DividendYield,  epsilon);  break;
-            case BumpType.DividendYieldDown:  m.DividendYield = ZeroCurve.Shift(m.DividendYield, -epsilon);  break;
-            default: throw new NotSupportedException($"Bump {bump} not supported by {GetType().Name}.");
+            case BumpType.VolUp:   vol += epsilon;                          break;
+            case BumpType.VolDown: vol  = Math.Max(0.0, vol - epsilon);    break;
+            default: throw new NotSupportedException($"Bump {bump} not supported by {GetType().Name}. Use ComputeGreeks(market, ...) for spot and rate bumps.");
         }
-        return new EQAsianOptionMCPricer(OptionDef, ValuationDate, m, vol, Cube);
+        return new EQAsianOptionMCPricer(OptionDef, ValuationDate, vol, Cube);
     }
 }

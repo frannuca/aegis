@@ -2,6 +2,7 @@ using Aegis.Instruments;
 using AnalyticalPricers;
 using MCPricer.FX;
 using RandomSimulator;
+using NodaTime;
 
 namespace MCPricer.Tests;
 
@@ -44,8 +45,8 @@ public sealed class FXBarrierOptionMCPricerTests
     // at the option's expiry from this valuation date — see ZeroCurve.InterpolateRate.
     // Tests use single-pillar "flat" curves so the interpolated rate equals the scalar
     // reference rate (Rd, Rf) regardless of T, keeping the analytical comparisons exact.
-    private static readonly DateOnly ValuationDate = new(2026, 1, 1);
-    private static readonly DateOnly CurveMaturity = new(2036, 1, 1);
+    private static readonly LocalDate ValuationDate = new(2026, 1, 1);
+    private static readonly LocalDate CurveMaturity = new(2036, 1, 1);
 
     private const int Paths       = 100_000;
     private const int Steps       = 50;     // daily-ish monitoring for barriers
@@ -61,13 +62,14 @@ public sealed class FXBarrierOptionMCPricerTests
     public void KnockInPlusKnockOut_EqualsVanilla(
         bool isCall, BarrierType kiType, BarrierType koType, double h, string _)
     {
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, Rd, Rf);
 
-        var vanilla = BuildVanilla(S0, K, T, Sigma, Rd, Rf, isCall, cube).Price();
+        var vanilla = BuildVanilla(S0, K, T, Sigma, Rd, Rf, isCall, cube).Price(market);
         var ki      = BuildBarrier(S0, K, T, Sigma, Rd, Rf, h, kiType,
-                                   BarrierObservation.Discrete, isCall, rebate: 0.0, cube).Price();
+                                   BarrierObservation.Discrete, isCall, rebate: 0.0, cube).Price(market);
         var ko      = BuildBarrier(S0, K, T, Sigma, Rd, Rf, h, koType,
-                                   BarrierObservation.Discrete, isCall, rebate: 0.0, cube).Price();
+                                   BarrierObservation.Discrete, isCall, rebate: 0.0, cube).Price(market);
 
         // Same cube → same path payoffs → KI + KO = Vanilla exactly up to float rounding.
         Assert.True(
@@ -84,9 +86,10 @@ public sealed class FXBarrierOptionMCPricerTests
         var forward  = S0 * Math.Exp((Rd - Rf) * T);
         var expected = Math.Exp(-Rd * T) * Math.Max(forward - K, 0.0);
 
-        var cube = SimulationCube.GenerateIndependent(1_000, 1, 1, DefaultSeed);
-        var mc   = BuildBarrier(S0, K, T, 0.0, Rd, Rf, H_Up, BarrierType.UpAndOut,
-                                BarrierObservation.Discrete, isCall: true, rebate: 0.0, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(1_000, 1, 1, DefaultSeed);
+        var market = MakeMarket(S0, Rd, Rf);
+        var mc     = BuildBarrier(S0, K, T, 0.0, Rd, Rf, H_Up, BarrierType.UpAndOut,
+                                  BarrierObservation.Discrete, isCall: true, rebate: 0.0, cube).Price(market);
 
         Assert.Equal(expected, mc.Price, precision: 10);
     }
@@ -97,9 +100,10 @@ public sealed class FXBarrierOptionMCPricerTests
     public void ZeroVol_UpAndIn_BarrierNeverReached_PricesAtZero()
     {
         // Same deterministic path as above; UpAndIn requires barrier hit → not activated
-        var cube = SimulationCube.GenerateIndependent(1_000, 1, 1, DefaultSeed);
-        var mc   = BuildBarrier(S0, K, T, 0.0, Rd, Rf, H_Up, BarrierType.UpAndIn,
-                                BarrierObservation.Discrete, isCall: true, rebate: 0.0, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(1_000, 1, 1, DefaultSeed);
+        var market = MakeMarket(S0, Rd, Rf);
+        var mc     = BuildBarrier(S0, K, T, 0.0, Rd, Rf, H_Up, BarrierType.UpAndIn,
+                                  BarrierObservation.Discrete, isCall: true, rebate: 0.0, cube).Price(market);
 
         Assert.Equal(0.0, mc.Price, precision: 10);
     }
@@ -115,9 +119,10 @@ public sealed class FXBarrierOptionMCPricerTests
         const double rf0    = 0.10;
         const double rebate = 0.02;
 
-        var cube = SimulationCube.GenerateIndependent(1_000, 1, 1, DefaultSeed);
-        var mc   = BuildBarrier(S0, K, T, 0.0, rd0, rf0, h, BarrierType.DownAndOut,
-                                BarrierObservation.Discrete, isCall: true, rebate, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(1_000, 1, 1, DefaultSeed);
+        var market = MakeMarket(S0, rd0, rf0);
+        var mc     = BuildBarrier(S0, K, T, 0.0, rd0, rf0, h, BarrierType.DownAndOut,
+                                  BarrierObservation.Discrete, isCall: true, rebate, cube).Price(market);
 
         // rd=0 → discount factor = 1; every path is knocked out → pays rebate
         Assert.Equal(rebate, mc.Price, precision: 10);
@@ -136,9 +141,10 @@ public sealed class FXBarrierOptionMCPricerTests
         var sT       = S0 * Math.Exp(-rf0 * T);            // ≈ 0.995
         var expected = Math.Max(K - sT, 0.0);               // put; rd=0 → DF=1
 
-        var cube = SimulationCube.GenerateIndependent(1_000, 1, 1, DefaultSeed);
-        var mc   = BuildBarrier(S0, K, T, 0.0, rd0, rf0, h, BarrierType.DownAndIn,
-                                BarrierObservation.Discrete, isCall: false, rebate: 0.0, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(1_000, 1, 1, DefaultSeed);
+        var market = MakeMarket(S0, rd0, rf0);
+        var mc     = BuildBarrier(S0, K, T, 0.0, rd0, rf0, h, BarrierType.DownAndIn,
+                                  BarrierObservation.Discrete, isCall: false, rebate: 0.0, cube).Price(market);
 
         Assert.Equal(expected, mc.Price, precision: 10);
     }
@@ -149,10 +155,11 @@ public sealed class FXBarrierOptionMCPricerTests
     public void UpAndOut_BarrierVeryHigh_EqualsVanilla()
     {
         // H=100 is unreachable → UpAndOut never triggers → price = vanilla call
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildBarrier(S0, K, T, Sigma, Rd, Rf, barrierLevel: 100.0,
-                                BarrierType.UpAndOut, BarrierObservation.Discrete,
-                                isCall: true, rebate: 0.0, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, Rd, Rf);
+        var mc     = BuildBarrier(S0, K, T, Sigma, Rd, Rf, barrierLevel: 100.0,
+                                  BarrierType.UpAndOut, BarrierObservation.Discrete,
+                                  isCall: true, rebate: 0.0, cube).Price(market);
 
         var gk = GarmanKohlhagen.Price(S0, K, T, Sigma, Rd, Rf, isCall: true);
         AssertWithinMcBounds(mc, gk, sigma: 5.0);
@@ -162,10 +169,11 @@ public sealed class FXBarrierOptionMCPricerTests
     public void DownAndOut_BarrierVeryLow_EqualsVanilla()
     {
         // H=0.001 is unreachable → DownAndOut never triggers → price = vanilla call
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildBarrier(S0, K, T, Sigma, Rd, Rf, barrierLevel: 0.001,
-                                BarrierType.DownAndOut, BarrierObservation.Discrete,
-                                isCall: true, rebate: 0.0, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, Rd, Rf);
+        var mc     = BuildBarrier(S0, K, T, Sigma, Rd, Rf, barrierLevel: 0.001,
+                                  BarrierType.DownAndOut, BarrierObservation.Discrete,
+                                  isCall: true, rebate: 0.0, cube).Price(market);
 
         var gk = GarmanKohlhagen.Price(S0, K, T, Sigma, Rd, Rf, isCall: true);
         AssertWithinMcBounds(mc, gk, sigma: 5.0);
@@ -177,11 +185,12 @@ public sealed class FXBarrierOptionMCPricerTests
     public void UpAndOut_RebateIncreasesPrice()
     {
         // A larger rebate on knockout increases the UpAndOut value
-        var cube      = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var noRebate  = BuildBarrier(S0, K, T, Sigma, Rd, Rf, H_Up, BarrierType.UpAndOut,
-                                     BarrierObservation.Discrete, isCall: true, rebate: 0.0,  cube).Price();
+        var cube       = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market     = MakeMarket(S0, Rd, Rf);
+        var noRebate   = BuildBarrier(S0, K, T, Sigma, Rd, Rf, H_Up, BarrierType.UpAndOut,
+                                      BarrierObservation.Discrete, isCall: true, rebate: 0.0,  cube).Price(market);
         var withRebate = BuildBarrier(S0, K, T, Sigma, Rd, Rf, H_Up, BarrierType.UpAndOut,
-                                      BarrierObservation.Discrete, isCall: true, rebate: 0.05, cube).Price();
+                                      BarrierObservation.Discrete, isCall: true, rebate: 0.05, cube).Price(market);
 
         Assert.True(withRebate.Price > noRebate.Price,
             $"No-rebate={noRebate.Price:F6}  With-rebate={withRebate.Price:F6}");
@@ -191,11 +200,12 @@ public sealed class FXBarrierOptionMCPricerTests
     public void UpAndIn_RebateIncreasesPrice()
     {
         // Rebate is paid when barrier is NOT hit (i.e., on non-activated paths)
-        var cube      = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var noRebate  = BuildBarrier(S0, K, T, Sigma, Rd, Rf, H_Up, BarrierType.UpAndIn,
-                                     BarrierObservation.Discrete, isCall: true, rebate: 0.0,  cube).Price();
+        var cube       = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market     = MakeMarket(S0, Rd, Rf);
+        var noRebate   = BuildBarrier(S0, K, T, Sigma, Rd, Rf, H_Up, BarrierType.UpAndIn,
+                                      BarrierObservation.Discrete, isCall: true, rebate: 0.0,  cube).Price(market);
         var withRebate = BuildBarrier(S0, K, T, Sigma, Rd, Rf, H_Up, BarrierType.UpAndIn,
-                                      BarrierObservation.Discrete, isCall: true, rebate: 0.05, cube).Price();
+                                      BarrierObservation.Discrete, isCall: true, rebate: 0.05, cube).Price(market);
 
         Assert.True(withRebate.Price > noRebate.Price,
             $"No-rebate={noRebate.Price:F6}  With-rebate={withRebate.Price:F6}");
@@ -210,10 +220,11 @@ public sealed class FXBarrierOptionMCPricerTests
         // → lower UpAndOut price. Verified with 5σ slack to absorb MC noise from the
         // separate bridge RNG draws used in continuous mode.
         var cube       = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market     = MakeMarket(S0, Rd, Rf);
         var discrete   = BuildBarrier(S0, K, T, Sigma, Rd, Rf, H_Up, BarrierType.UpAndOut,
-                                      BarrierObservation.Discrete, isCall: true, rebate: 0.0, cube).Price();
+                                      BarrierObservation.Discrete, isCall: true, rebate: 0.0, cube).Price(market);
         var continuous = BuildBarrier(S0, K, T, Sigma, Rd, Rf, H_Up, BarrierType.UpAndOut,
-                                      BarrierObservation.Continuous, isCall: true, rebate: 0.0, cube).Price();
+                                      BarrierObservation.Continuous, isCall: true, rebate: 0.0, cube).Price(market);
 
         var tolerance = 5.0 * (discrete.StandardError + continuous.StandardError);
         Assert.True(continuous.Price <= discrete.Price + tolerance,
@@ -229,8 +240,8 @@ public sealed class FXBarrierOptionMCPricerTests
         var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
         using var pricer = BuildBarrier(S0, K, T, Sigma, Rd, Rf, H_Up, BarrierType.UpAndOut,
                                         BarrierObservation.Discrete, isCall: true, rebate: 0.0, cube);
-
-        var greeks = pricer.ComputeGreeks(spotEps: 0.01, volEps: 0.001, rateEps: 0.0001);
+        var market = MakeMarket(S0, Rd, Rf);
+        var greeks = pricer.ComputeGreeks(market, spotEps: 0.01, volEps: 0.001, rateEps: 0.0001);
 
         Assert.True(double.IsFinite(greeks.Delta), $"Delta={greeks.Delta}");
         Assert.True(double.IsFinite(greeks.Gamma), $"Gamma={greeks.Gamma}");
@@ -255,8 +266,9 @@ public sealed class FXBarrierOptionMCPricerTests
         using var vanillaPricer = BuildVanilla(S0, K, T, Sigma, Rd, Rf, isCall: true,
                                                SimulationCube.GenerateIndependent(Paths, 1, 1, DefaultSeed));
 
-        var barrierDelta = barrierPricer.ComputeGreeks(spotEps: 0.01).Delta;
-        var vanillaDelta = vanillaPricer.ComputeGreeks(spotEps: 0.01).Delta;
+        var market       = MakeMarket(S0, Rd, Rf);
+        var barrierDelta = barrierPricer.ComputeGreeks(market, spotEps: 0.01).Delta;
+        var vanillaDelta = vanillaPricer.ComputeGreeks(market, spotEps: 0.01).Delta;
 
         // Allow 5σ MC slack ≈ 5 × 0.07 (SE of each bump-and-reprice delta estimator)
         Assert.True(barrierDelta < vanillaDelta + 0.35,
@@ -287,9 +299,8 @@ public sealed class FXBarrierOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Vanilla       = new VanillaOption()
         };
-        var market = MakeMarket(S0, Rd, Rf);
         Assert.Throws<ArgumentException>(() =>
-            new FXBarrierOptionMCPricer(vanillaOpt, ValuationDate, market, Sigma, cube));
+            new FXBarrierOptionMCPricer(vanillaOpt, ValuationDate, Sigma, cube));
     }
 
     // ── Greeks: vanilla pricer vs analytical delta ────────────────────────────
@@ -306,14 +317,13 @@ public sealed class FXBarrierOptionMCPricerTests
         var d1    = (Math.Log(S0 / K) + (Rd - Rf + 0.5 * Sigma * Sigma) * T) / (Sigma * sqrtT);
         var analyticalDelta = Math.Exp(-Rf * T) * NormalDistribution.Cdf(d1);
 
-        var cube = SimulationCube.GenerateIndependent(Paths, 1, 1, DefaultSeed);
+        var cube   = SimulationCube.GenerateIndependent(Paths, 1, 1, DefaultSeed);
+        var market = MakeMarket(S0, Rd, Rf);
         using var pricer = BuildVanilla(S0, K, T, Sigma, Rd, Rf, isCall: true, cube);
-        var greeks = pricer.ComputeGreeks(spotEps: 0.01);
+        var greeks = pricer.ComputeGreeks(market, spotEps: 0.01);
 
-        // Bump-and-reprice delta is estimated with finite MC noise; use 5σ bound
-        // on the error contribution of the three pricing runs (mid, up, down).
-        var seBound = 3.0 * 5.0 * cube.Paths;  // rough: 3 × 5σ × SE per run
-        // Actually just use a practical absolute tolerance for ATM delta ≈ 0.57
+        // Bump-and-reprice delta has finite MC noise; use a practical absolute tolerance
+        // for ATM delta ≈ 0.57
         Assert.True(Math.Abs(greeks.Delta - analyticalDelta) < 0.01,
             $"MC delta={greeks.Delta:F4}  Analytical={analyticalDelta:F4}");
     }
@@ -327,9 +337,10 @@ public sealed class FXBarrierOptionMCPricerTests
         var nprime = NormalDistribution.Pdf(d1);
         var analyticalVega = S0 * Math.Exp(-Rf * T) * nprime * sqrtT;
 
-        var cube = SimulationCube.GenerateIndependent(Paths, 1, 1, DefaultSeed);
+        var cube   = SimulationCube.GenerateIndependent(Paths, 1, 1, DefaultSeed);
+        var market = MakeMarket(S0, Rd, Rf);
         using var pricer = BuildVanilla(S0, K, T, Sigma, Rd, Rf, isCall: true, cube);
-        var greeks = pricer.ComputeGreeks(volEps: 0.001);
+        var greeks = pricer.ComputeGreeks(market, volEps: 0.001);
 
         Assert.True(Math.Abs(greeks.Vega - analyticalVega) < 0.01,
             $"MC vega={greeks.Vega:F4}  Analytical={analyticalVega:F4}");
@@ -358,7 +369,7 @@ public sealed class FXBarrierOptionMCPricerTests
                 Rebate       = rebate
             }
         };
-        return new FXBarrierOptionMCPricer(option, ValuationDate, MakeMarket(spot, rd, rf), sigma, cube);
+        return new FXBarrierOptionMCPricer(option, ValuationDate, sigma, cube);
     }
 
     private static FXVanillaOptionMCPricer BuildVanilla(
@@ -374,7 +385,7 @@ public sealed class FXBarrierOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Vanilla       = new VanillaOption()
         };
-        return new FXVanillaOptionMCPricer(option, ValuationDate, MakeMarket(spot, rd, rf), sigma, cube);
+        return new FXVanillaOptionMCPricer(option, ValuationDate, sigma, cube);
     }
 
     private static FxMarketData MakeMarket(double spot, double rd, double rf) =>

@@ -1,5 +1,6 @@
 using Aegis.Instruments;
 using RandomSimulator;
+using NodaTime;
 
 namespace MCPricer.FX;
 
@@ -8,26 +9,16 @@ namespace MCPricer.FX;
 /// domestic risk-neutral measure with one correlated GBM per leg.
 ///
 /// ── Model ─────────────────────────────────────────────────────────────────────
-/// Each leg i follows Garman-Kohlhagen GBM (see <see cref="FXMCPricer"/>):
+/// Each leg i follows Garman-Kohlhagen GBM (see GbmOptionMCPricer):
 ///   dS_i/S_i = (r_d − r_f,i) dt + σ_i dW_i,    corr(dW_i, dW_j) = ρ_ij
 ///
 /// All legs must share the same domestic (settlement) currency, so a single
-/// discount factor P(0,T) = exp(−r_d·T) applies to the whole basket — this is
-/// the standard convention for cross-pairs quoted against one pricing currency
-/// (e.g. EURUSD, GBPUSD, JPYUSD all settle in USD). r_d is taken from the first
-/// leg's market data (sorted order); the pricer does not cross-check that all
-/// legs agree, since mixed-domestic-currency baskets require an FX conversion
-/// layer outside this pricer's scope.
+/// discount factor P(0,T) = exp(−r_d·T) applies to the whole basket — taken
+/// from the first leg's domestic curve (sorted order). Per-step drift for each
+/// leg uses ZeroCurve.ForwardRate on that leg's domestic/foreign curves.
 ///
-/// Each leg's domestic_rate / foreign_rate are zero-rate curves (Pillars), not
-/// flat scalars: per leg, the curve is interpolated once at the option's expiry
-/// T (via ZeroCurve.InterpolateRate, given the supplied valuation date) into a
-/// single effective rate r_{d,i}(T), r_{f,i}(T) — exactly mirroring FXMCPricer's
-/// treatment. The simulated process per leg remains flat-rate GBM over [0, T].
-///
-/// Correlation between legs lives entirely in the SimulationCube (Cholesky of
-/// the leg correlation matrix); this pricer reads independent increments per
-/// asset index via Cube.StepIncrements.
+/// Correlation between legs lives in the SimulationCube (Cholesky of the leg
+/// correlation matrix); this pricer reads correlated increments per asset index.
 ///
 /// ── Basket level and payoff ───────────────────────────────────────────────────
 ///   level = Aggregate(method, [w_1·S_1(T), …, w_N·S_N(T)])      (BasketAggregator)
@@ -42,21 +33,17 @@ namespace MCPricer.FX;
 /// Basket.UnderlyingToWeight keys are the single source of truth for basket
 /// composition. For an FX basket, every key MUST parse as a currency pair —
 /// either a 6-letter code ("EURUSD") or separator form ("EUR/USD", "EUR-USD") —
-/// yielding a well-formed CurrencyPair{BaseCurrency, QuoteCurrency}. Keys that
-/// don't parse (e.g. equity tickers slipped into an FX basket) are rejected.
-/// Each parsed pair must then have matching entries in `markets` (by the same
-/// key, with FxMarketData.CurrencyPair echoing it) and `volatilities`.
+/// yielding a well-formed CurrencyPair. Keys that don't parse are rejected.
 ///
 /// ── Greeks ────────────────────────────────────────────────────────────────────
 /// Not supported: a basket has one delta/vega per leg, which doesn't fit the
-/// single-spot/single-vol bump model in MCBasePricer.ComputeGreeks. CreateBumped
-/// is intentionally left unoverridden (base throws NotSupportedException).
-/// Per-leg sensitivities would need a dedicated basket Greek API.
+/// single-spot/single-vol bump model in MCBasePricer. CreateBumped is
+/// intentionally left unoverridden (base throws NotSupportedException).
 ///
 /// ── Edge cases ────────────────────────────────────────────────────────────────
-///   Single-leg basket (N=1, weight=1): degenerates exactly to FXVanillaOptionMCPricer
-///   pricing under WEIGHTED_SUM/BEST_OF/WORST_OF alike (all three reduce to the
-///   single value). Useful as an exact analytical check (Garman-Kohlhagen).
+///   Single-leg basket (N=1, weight=1): degenerates exactly to
+///   FXVanillaOptionMCPricer pricing (all three aggregation methods reduce to
+///   the single value). Useful as an exact analytical check (Garman-Kohlhagen).
 ///   Zero vol on all legs: deterministic terminal spots → exact intrinsic value.
 /// </summary>
 public sealed class FXBasketVanillaMCPricer : MCBasePricer
@@ -64,13 +51,17 @@ public sealed class FXBasketVanillaMCPricer : MCBasePricer
     private readonly double                  _strike;
     private readonly double                  _phi;            // +1 call, −1 put
     private readonly BasketAggregationMethod _aggregation;
-    private readonly double                  _discountFactor; // exp(-r_d·T)
+    private readonly string[]                _legNames;       // sorted leg identifiers
+    private readonly double[]                _weights;
 
-    private readonly string[] _legNames;       // sorted leg identifiers, e.g. ["EURUSD","GBPUSD"]
-    private readonly double[] _initialSpots;
-    private readonly double[] _weights;
-    private readonly double[] _drifts;         // (r_d - r_f,i - ½σ_i²)·dt
-    private readonly double[] _diffusions;     // σ_i·√dt
+    private readonly LocalDate  _valuationDate;
+    private readonly double    _expiryYears;
+
+    // Set by PrepareFromMarket; valid during and after the most recent Price(markets, vols) call.
+    private double[]  _initialSpots  = null!;
+    private double[,] _drift         = null!;   // [leg, step]
+    private double[]  _diffusions    = null!;   // σ_i·√dt
+    private double    _discountFactor;
 
     // One scratch buffer per thread: holds terminal spots, then overwritten
     // in-place with weighted values w_i·S_i(T) before aggregation.
@@ -80,16 +71,12 @@ public sealed class FXBasketVanillaMCPricer : MCBasePricer
     public IReadOnlyList<string> LegNames => _legNames;
 
     public FXBasketVanillaMCPricer(
-        Option                                     option,
-        DateOnly                                   valuationDate,
-        IReadOnlyDictionary<string, FxMarketData>  markets,
-        IReadOnlyDictionary<string, double>        volatilities,
-        SimulationCube                             cube)
+        Option         option,
+        LocalDate       valuationDate,
+        SimulationCube cube)
         : base(cube)
     {
         ArgumentNullException.ThrowIfNull(option);
-        ArgumentNullException.ThrowIfNull(markets);
-        ArgumentNullException.ThrowIfNull(volatilities);
 
         if (option.UnderlyingKindCase != Option.UnderlyingKindOneofCase.Basket)
             throw new ArgumentException("Option.UnderlyingKind must be Basket.", nameof(option));
@@ -106,7 +93,6 @@ public sealed class FXBasketVanillaMCPricer : MCBasePricer
         if (basket.AggregationMethod == BasketAggregationMethod.Unspecified)
             throw new ArgumentException("Basket.AggregationMethod must be specified.", nameof(option));
 
-        // Sort for a deterministic, reproducible mapping onto cube asset indices.
         var legNames = basket.UnderlyingToWeight.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray();
         var n        = legNames.Length;
 
@@ -116,22 +102,70 @@ public sealed class FXBasketVanillaMCPricer : MCBasePricer
                 "one correlated GBM factor per leg, asset index = sorted position of the leg identifier.",
                 nameof(cube));
 
-        var dt           = option.ExpiryYears / cube.Steps;
-        var initialSpots = new double[n];
-        var weights      = new double[n];
-        var drifts       = new double[n];
-        var diffusions   = new double[n];
-        double? domesticRate = null;
-
-        for (var i = 0; i < n; i++)
+        foreach (var name in legNames)
         {
-            var name = legNames[i];
-
             if (!TryParseCurrencyPair(name, out _))
                 throw new ArgumentException(
                     $"Basket leg '{name}' is not a valid FX currency pair " +
                     "(expected a 6-letter code like 'EURUSD' or separated form 'EUR/USD').",
                     nameof(option));
+        }
+
+        _legNames     = legNames;
+        _weights      = legNames.Select(name => basket.UnderlyingToWeight[name]).ToArray();
+        _strike       = option.Strike;
+        _phi          = option.OptionType == OptionType.Call ? 1.0 : -1.0;
+        _aggregation  = basket.AggregationMethod;
+        _valuationDate = valuationDate;
+        _expiryYears   = option.ExpiryYears;
+
+        var legCount = n;
+        _scratch = new ThreadLocal<double[]>(() => new double[legCount]);
+    }
+
+    /// <summary>
+    /// Prices the basket option for the given market data and per-leg volatilities.
+    /// Per-step drift is computed using ZeroCurve.ForwardRate for each leg.
+    /// </summary>
+    public PricingResult Price(
+        IReadOnlyDictionary<string, FxMarketData> markets,
+        IReadOnlyDictionary<string, double>       volatilities)
+    {
+        PrepareFromMarket(markets, volatilities);
+        return base.Price();
+    }
+
+    /// <summary>
+    /// Prices the basket option asynchronously for the given market data and per-leg volatilities.
+    /// </summary>
+    public Task<PricingResult> PriceAsync(
+        IReadOnlyDictionary<string, FxMarketData> markets,
+        IReadOnlyDictionary<string, double>       volatilities,
+        CancellationToken                         ct = default)
+    {
+        PrepareFromMarket(markets, volatilities);
+        return base.PriceAsync(ct);
+    }
+
+    private void PrepareFromMarket(
+        IReadOnlyDictionary<string, FxMarketData> markets,
+        IReadOnlyDictionary<string, double>       volatilities)
+    {
+        ArgumentNullException.ThrowIfNull(markets);
+        ArgumentNullException.ThrowIfNull(volatilities);
+
+        var n    = _legNames.Length;
+        var T    = _expiryYears;
+        var dt   = T / Cube.Steps;
+
+        var initialSpots = new double[n];
+        var drift        = new double[n, Cube.Steps];
+        var diffusions   = new double[n];
+        double? domesticRate = null;
+
+        for (var i = 0; i < n; i++)
+        {
+            var name = _legNames[i];
 
             if (!markets.TryGetValue(name, out var market) || market is null)
                 throw new ArgumentException($"No market data supplied for basket leg '{name}'.", nameof(markets));
@@ -148,34 +182,36 @@ public sealed class FXBasketVanillaMCPricer : MCBasePricer
                     "basket leg identifier — provide market data keyed and labelled consistently.",
                     nameof(markets));
 
-            var legDomesticRate = ZeroCurve.InterpolateRate(market.DomesticRate, valuationDate, option.ExpiryYears);
-            var legForeignRate  = ZeroCurve.InterpolateRate(market.ForeignRate,  valuationDate, option.ExpiryYears);
+            // First leg (sorted order) sets the settlement-currency discount rate.
+            if (i == 0)
+                domesticRate = ZeroCurve.InterpolateRate(market.DomesticRate, _valuationDate, T);
 
-            // First leg (sorted order) sets the common settlement-currency discount rate.
-            domesticRate ??= legDomesticRate;
+            // Per-step drift for leg i: (fDisc_i[t] - fCarry_i[t] - 0.5·σ²)·dt
+            for (var t = 0; t < Cube.Steps; t++)
+            {
+                var t0   = t * dt;
+                var t1   = (t + 1) * dt;
+                var fD   = ZeroCurve.ForwardRate(market.DomesticRate, _valuationDate, t0, t1);
+                var fF   = ZeroCurve.ForwardRate(market.ForeignRate,  _valuationDate, t0, t1);
+                drift[i, t] = (fD - fF - 0.5 * vol * vol) * dt;
+            }
 
             initialSpots[i] = market.Spot;
-            weights[i]      = basket.UnderlyingToWeight[name];
-            drifts[i]       = (legDomesticRate - legForeignRate - 0.5 * vol * vol) * dt;
             diffusions[i]   = vol * Math.Sqrt(dt);
         }
 
-        _legNames       = legNames;
-        _initialSpots   = initialSpots;
-        _weights        = weights;
-        _drifts         = drifts;
-        _diffusions     = diffusions;
-        _strike         = option.Strike;
-        _phi            = option.OptionType == OptionType.Call ? 1.0 : -1.0;
-        _aggregation    = basket.AggregationMethod;
-        _discountFactor = Math.Exp(-domesticRate!.Value * option.ExpiryYears);
-
-        var legCount = n;
-        _scratch = new ThreadLocal<double[]>(() => new double[legCount]);
+        _initialSpots  = initialSpots;
+        _drift         = drift;
+        _diffusions    = diffusions;
+        _discountFactor = Math.Exp(-domesticRate!.Value * T);
     }
 
     protected override double SimulatePath(int pathIndex)
     {
+        if (_drift is null)
+            throw new InvalidOperationException(
+                "Market data has not been supplied. Call Price(markets, volatilities) instead of Price().");
+
         var buf = _scratch.Value!;
         var n   = _legNames.Length;
 
@@ -185,7 +221,7 @@ public sealed class FXBasketVanillaMCPricer : MCBasePricer
         {
             var z = Cube.StepIncrements(pathIndex, t);
             for (var i = 0; i < n; i++)
-                buf[i] *= Math.Exp(_drifts[i] + _diffusions[i] * z[i]);
+                buf[i] *= Math.Exp(_drift[i, t] + _diffusions[i] * z[i]);
         }
 
         // Overwrite terminal spots in-place with weighted values w_i·S_i(T).

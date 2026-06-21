@@ -1,4 +1,5 @@
 using Aegis.Instruments;
+using NodaTime;
 using RandomSimulator;
 
 namespace MCPricer.FX;
@@ -25,6 +26,10 @@ namespace MCPricer.FX;
 /// Option price:
 ///   Price = P(0,T) · E^T[payoff(F(T), σ(T))]
 ///   P(0,T) = exp(−r_d · T)
+///
+/// Under the T-forward measure, the forward F is a martingale — no drift term.
+/// Rates are interpolated once at T (not per-step), since the SABR SDE has no
+/// drift in the forward process.
 ///
 /// ── Discretization ────────────────────────────────────────────────────────────
 ///
@@ -62,24 +67,23 @@ namespace MCPricer.FX;
 /// ── Thread safety ─────────────────────────────────────────────────────────────
 /// _buffers is ThreadLocal; each thread owns its (fwdBuf, volBuf) pair.
 /// SimulationCube is read-only after construction. Safe for Parallel.For.
+/// Sequential repricing with different IMarketData is supported; concurrent
+/// repricing on the same instance with different markets is NOT safe.
 /// </summary>
 public abstract class FXSABRMCPricer : MCBasePricer
 {
-    protected readonly FxMarketData    Market;
     protected readonly Option          OptionDef;
-    protected readonly DateOnly        ValuationDate;
+    protected readonly LocalDate       ValuationDate;
     protected readonly SabrParameters  Sabr;
-    protected readonly double          InitialForward;   // F(0) = S₀·exp((r_d−r_f)·T)
-    protected readonly double          DiscountFactor;   // P(0,T) = exp(−r_d·T)
     protected readonly double          Dt;
 
-    /// <summary>Effective domestic zero rate r_d(T), interpolated from Market.DomesticRate at expiry T.</summary>
-    protected readonly double DomesticRate;
+    // Set by PrepareFromMarket; valid during and after the most recent Price(market) call.
+    protected double InitialForward  { get; private set; }
+    protected double DiscountFactor  { get; private set; }
+    protected double DomesticRate    { get; private set; }
+    protected double ForeignRate     { get; private set; }
 
-    /// <summary>Effective foreign zero rate r_f(T), interpolated from Market.ForeignRate at expiry T.</summary>
-    protected readonly double ForeignRate;
-
-    // Precomputed constants for the hot path
+    // Precomputed constants for the hot path (depend only on Sabr, not market)
     private readonly double _sqrtDt;
     private readonly double _volDriftAdj;    // −½ν²·dt  (exact log-Euler drift for σ)
     private readonly double _rhoComplement;  // √(1−ρ²)
@@ -88,16 +92,21 @@ public abstract class FXSABRMCPricer : MCBasePricer
 
     // One (fwdBuf, volBuf) pair per thread, reused across paths
     private readonly ThreadLocal<(double[] fwd, double[] vol)> _buffers;
+    private readonly ThreadLocal<int> _currentPathIndex = new();
+
+    /// <summary>
+    /// The index of the path currently being evaluated on the calling thread.
+    /// Valid only during EvaluatePayoff; undefined between paths.
+    /// </summary>
+    protected int CurrentPathIndex => _currentPathIndex.Value;
 
     protected FXSABRMCPricer(
         Option          option,
-        DateOnly        valuationDate,
-        FxMarketData    market,
+        LocalDate       valuationDate,
         SabrParameters  sabr,
         SimulationCube  cube) : base(cube)
     {
         ArgumentNullException.ThrowIfNull(option);
-        ArgumentNullException.ThrowIfNull(market);
         ArgumentNullException.ThrowIfNull(sabr);
 
         if (cube.Assets < 2)
@@ -107,8 +116,6 @@ public abstract class FXSABRMCPricer : MCBasePricer
                 nameof(cube));
         if (option.ExpiryYears <= 0)
             throw new ArgumentException("ExpiryYears must be positive.", nameof(option));
-        if (market.Spot <= 0)
-            throw new ArgumentException("Spot must be positive.", nameof(market));
         if (sabr.Alpha <= 0)
             throw new ArgumentOutOfRangeException(nameof(sabr), "Alpha must be > 0.");
         if (sabr.Beta is < 0 or > 1)
@@ -118,18 +125,10 @@ public abstract class FXSABRMCPricer : MCBasePricer
         if (sabr.Rho is <= -1 or >= 1)
             throw new ArgumentOutOfRangeException(nameof(sabr), "Rho must be in (−1, 1).");
 
-        var domesticRate = ZeroCurve.InterpolateRate(market.DomesticRate, valuationDate, option.ExpiryYears);
-        var foreignRate  = ZeroCurve.InterpolateRate(market.ForeignRate,  valuationDate, option.ExpiryYears);
-
-        Market          = market;
-        OptionDef       = option;
-        ValuationDate   = valuationDate;
-        Sabr            = sabr;
-        Dt              = option.ExpiryYears / cube.Steps;
-        DomesticRate    = domesticRate;
-        ForeignRate     = foreignRate;
-        DiscountFactor  = Math.Exp(-domesticRate * option.ExpiryYears);
-        InitialForward  = market.Spot * Math.Exp((domesticRate - foreignRate) * option.ExpiryYears);
+        OptionDef     = option;
+        ValuationDate = valuationDate;
+        Sabr          = sabr;
+        Dt            = option.ExpiryYears / cube.Steps;
 
         _sqrtDt        = Math.Sqrt(Dt);
         _volDriftAdj   = -0.5 * sabr.Nu * sabr.Nu * Dt;
@@ -140,6 +139,91 @@ public abstract class FXSABRMCPricer : MCBasePricer
         var steps = cube.Steps;
         _buffers = new ThreadLocal<(double[], double[])>(() =>
             (new double[steps], new double[steps]));
+    }
+
+    // ── Market-aware pricing entry points ─────────────────────────────────────
+
+    public override PricingResult Price(IMarketData market)
+    {
+        PrepareFromMarket(market);
+        return base.Price();
+    }
+
+    public override Task<PricingResult> PriceAsync(IMarketData market, CancellationToken ct = default)
+    {
+        PrepareFromMarket(market);
+        return base.PriceAsync(ct);
+    }
+
+    private void PrepareFromMarket(IMarketData market)
+    {
+        if (market.Spot <= 0)
+            throw new ArgumentException("Spot must be positive.", nameof(market));
+
+        var T = OptionDef.ExpiryYears;
+        DomesticRate   = ZeroCurve.InterpolateRate(market.DiscountCurve, ValuationDate, T);
+        ForeignRate    = ZeroCurve.InterpolateRate(market.CarryCurve,    ValuationDate, T);
+        DiscountFactor = Math.Exp(-DomesticRate * T);
+        InitialForward = market.Spot * Math.Exp((DomesticRate - ForeignRate) * T);
+    }
+
+    // ── Market-aware Greeks ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Computes first- and second-order price sensitivities via bump-and-reprice.
+    /// Spot and rate bumps reprice on this instance with bumped market data.
+    /// Vol bumps (alpha) create a new pricer instance with bumped Alpha.
+    /// Theta = NaN.
+    /// </summary>
+    public GreekResult ComputeGreeks(
+        IMarketData market,
+        double spotEps = 0.01,
+        double volEps  = 0.001,
+        double rateEps = 0.0001)
+    {
+        var mid = Price(market).Price;
+        var sUp = Price(MarketDataBumps.BumpSpot(market, +spotEps)).Price;
+        var sDn = Price(MarketDataBumps.BumpSpot(market, -spotEps)).Price;
+        var vUp = CreateBumped(BumpType.VolUp,   volEps).Price(market).Price;
+        var vDn = CreateBumped(BumpType.VolDown, volEps).Price(market).Price;
+        var rUp = Price(MarketDataBumps.BumpDiscountCurve(market, +rateEps)).Price;
+        var rDn = Price(MarketDataBumps.BumpDiscountCurve(market, -rateEps)).Price;
+
+        return new GreekResult(
+            Delta: (sUp - sDn)             / (2.0 * spotEps),
+            Gamma: (sUp - 2.0 * mid + sDn) / (spotEps * spotEps),
+            Vega:  (vUp - vDn)             / (2.0 * volEps),
+            Theta: double.NaN,
+            Rho:   (rUp - rDn)             / (2.0 * rateEps));
+    }
+
+    // ── SABR-specific Greek helpers ────────────────────────────────────────────
+
+    /// <summary>
+    /// Sensitivity to vol-of-vol ν (dV/dν), computed by central finite differences.
+    /// Reuses the same SimulationCube (common random numbers).
+    ///
+    /// nuEps: absolute bump in ν (default 0.01 = 1 vol-of-vol point).
+    /// Returns NaN if the bumped ν would go below 0.
+    /// </summary>
+    public double ComputeVolOfVolSensitivity(IMarketData market, double nuEps = 0.01)
+    {
+        var up  = CreateBumped(BumpType.SabrNuUp,   nuEps).Price(market).Price;
+        var dn  = CreateBumped(BumpType.SabrNuDown, nuEps).Price(market).Price;
+        return (up - dn) / (2.0 * nuEps);
+    }
+
+    /// <summary>
+    /// Sensitivity to Brownian correlation ρ (dV/dρ), computed by central finite
+    /// differences. Bumped ρ is clamped to (−1+ε, 1−ε) to stay in the valid range.
+    ///
+    /// rhoEps: absolute bump in ρ (default 0.01).
+    /// </summary>
+    public double ComputeCorrelSensitivity(IMarketData market, double rhoEps = 0.01)
+    {
+        var up  = CreateBumped(BumpType.SabrRhoUp,   rhoEps).Price(market).Price;
+        var dn  = CreateBumped(BumpType.SabrRhoDown, rhoEps).Price(market).Price;
+        return (up - dn) / (2.0 * rhoEps);
     }
 
     // ── Path simulation ────────────────────────────────────────────────────────
@@ -205,6 +289,10 @@ public abstract class FXSABRMCPricer : MCBasePricer
 
     protected sealed override double SimulatePath(int pathIndex)
     {
+        if (InitialForward == 0 && DiscountFactor == 0)
+            throw new InvalidOperationException(
+                "Market data has not been supplied. Call Price(IMarketData market) instead of Price().");
+        _currentPathIndex.Value = pathIndex;
         SimulateSabrPath(pathIndex);
         var (fwdBuf, volBuf) = GetPathBuffers();
         return DiscountFactor * EvaluatePayoff(
@@ -227,40 +315,11 @@ public abstract class FXSABRMCPricer : MCBasePricer
         ReadOnlySpan<double> fwdPath,
         ReadOnlySpan<double> volPath);
 
-    // ── SABR-specific Greek helpers ────────────────────────────────────────────
-
-    /// <summary>
-    /// Sensitivity to vol-of-vol ν (dV/dν), computed by central finite differences.
-    /// Reuses the same SimulationCube (common random numbers).
-    ///
-    /// nuEps: absolute bump in ν (default 0.01 = 1 vol-of-vol point).
-    /// Returns NaN if the bumped ν would go below 0.
-    /// </summary>
-    public double ComputeVolOfVolSensitivity(double nuEps = 0.01)
-    {
-        var up  = CreateBumped(BumpType.SabrNuUp,   nuEps).Price().Price;
-        var dn  = CreateBumped(BumpType.SabrNuDown, nuEps).Price().Price;
-        return (up - dn) / (2.0 * nuEps);
-    }
-
-    /// <summary>
-    /// Sensitivity to Brownian correlation ρ (dV/dρ), computed by central finite
-    /// differences. Bumped ρ is clamped to (−1+ε, 1−ε) to stay in the valid range.
-    ///
-    /// rhoEps: absolute bump in ρ (default 0.01).
-    /// </summary>
-    public double ComputeCorrelSensitivity(double rhoEps = 0.01)
-    {
-        var up  = CreateBumped(BumpType.SabrRhoUp,   rhoEps).Price().Price;
-        var dn  = CreateBumped(BumpType.SabrRhoDown, rhoEps).Price().Price;
-        return (up - dn) / (2.0 * rhoEps);
-    }
-
     // ── Disposal ──────────────────────────────────────────────────────────────
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _buffers.Dispose();
+        if (disposing) { _buffers.Dispose(); _currentPathIndex.Dispose(); }
         base.Dispose(disposing);
     }
 }

@@ -3,6 +3,7 @@ using Aegis.Instruments;
 using MCPricer.FX;
 using RandomSimulator;
 using Xunit.Abstractions;
+using NodaTime;
 
 namespace MCPricer.Tests;
 
@@ -69,8 +70,8 @@ public sealed class FXBasketBarrierOptionContinuousPerformanceTests
     private const int Steps       = 250;     // 250 daily observations over a 1-year trade
     private const int DefaultSeed = 42;
 
-    private static readonly DateOnly ValuationDate = new(2026, 1, 1);
-    private static readonly DateOnly CurveMaturity = new(2036, 1, 1);
+    private static readonly LocalDate ValuationDate = new(2026, 1, 1);
+    private static readonly LocalDate CurveMaturity = new(2036, 1, 1);
 
     private static readonly double[,] Correlation =
     {
@@ -92,10 +93,10 @@ public sealed class FXBasketBarrierOptionContinuousPerformanceTests
         using var pricer = new FXBasketBarrierOptionMCPricer(
             MakeBasketBarrierOption(legSpec, BasketAggregationMethod.WeightedSum, Strike, isCall: true,
                 H_Up, BarrierType.UpAndOut, BarrierObservation.Continuous),
-            ValuationDate, markets, vols, cube);
+            ValuationDate, cube);
 
         var stopwatch = Stopwatch.StartNew();
-        var result = pricer.Price();
+        var result = pricer.Price(markets, vols);
         stopwatch.Stop();
 
         var elapsedSeconds = stopwatch.Elapsed.TotalSeconds;
@@ -125,7 +126,7 @@ public sealed class FXBasketBarrierOptionContinuousPerformanceTests
 
         var vanilla = new FXBasketVanillaMCPricer(
             MakeBasketOption(legSpec, BasketAggregationMethod.WeightedSum, Strike, isCall: true),
-            ValuationDate, markets, vols, cube).Price();
+            ValuationDate, cube).Price(markets, vols);
 
         var slack = 5.0 * (result.StandardError + vanilla.StandardError);
         Assert.True(result.Price <= vanilla.Price + slack,

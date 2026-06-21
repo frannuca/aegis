@@ -2,6 +2,7 @@ using Aegis.Instruments;
 using AnalyticalPricers;
 using MCPricer.Equity;
 using RandomSimulator;
+using NodaTime;
 
 namespace MCPricer.Tests;
 
@@ -28,8 +29,8 @@ public sealed class EQAsianOptionMCPricerTests
     private const int Steps       = 12;      // monthly monitoring
     private const int DefaultSeed = 42;
 
-    private static readonly DateOnly ValuationDate = new(2026, 1, 1);
-    private static readonly DateOnly CurveMaturity = new(2036, 1, 1);
+    private static readonly LocalDate ValuationDate = new(2026, 1, 1);
+    private static readonly LocalDate CurveMaturity = new(2036, 1, 1);
 
     // ── Geometric average-price vs. Kemna-Vorst closed form ───────────────────
 
@@ -66,9 +67,10 @@ public sealed class EQAsianOptionMCPricerTests
     [Fact]
     public void ArithmeticAveragePriceCall_AtLeastAsExpensiveAs_GeometricCall_ByJensensInequality()
     {
-        var cube  = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var arith = BuildPricer(S0, K, T, Sigma, R, Q, AsianAveragingMethod.Arithmetic, AsianStrikeStyle.AveragePrice, true, cube).Price();
-        var geo   = BuildPricer(S0, K, T, Sigma, R, Q, AsianAveragingMethod.Geometric,  AsianStrikeStyle.AveragePrice, true, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, R, Q);
+        var arith  = BuildPricer(S0, K, T, Sigma, R, Q, AsianAveragingMethod.Arithmetic, AsianStrikeStyle.AveragePrice, true, cube).Price(market);
+        var geo    = BuildPricer(S0, K, T, Sigma, R, Q, AsianAveragingMethod.Geometric,  AsianStrikeStyle.AveragePrice, true, cube).Price(market);
 
         Assert.True(arith.Price >= geo.Price - 1e-9,
             $"Arithmetic call price {arith.Price:F6} must be ≥ geometric call price {geo.Price:F6} " +
@@ -78,9 +80,10 @@ public sealed class EQAsianOptionMCPricerTests
     [Fact]
     public void ArithmeticAveragePricePut_AtMostAsExpensiveAs_GeometricPut_ByJensensInequality()
     {
-        var cube  = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var arith = BuildPricer(S0, K, T, Sigma, R, Q, AsianAveragingMethod.Arithmetic, AsianStrikeStyle.AveragePrice, false, cube).Price();
-        var geo   = BuildPricer(S0, K, T, Sigma, R, Q, AsianAveragingMethod.Geometric,  AsianStrikeStyle.AveragePrice, false, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, R, Q);
+        var arith  = BuildPricer(S0, K, T, Sigma, R, Q, AsianAveragingMethod.Arithmetic, AsianStrikeStyle.AveragePrice, false, cube).Price(market);
+        var geo    = BuildPricer(S0, K, T, Sigma, R, Q, AsianAveragingMethod.Geometric,  AsianStrikeStyle.AveragePrice, false, cube).Price(market);
 
         Assert.True(arith.Price <= geo.Price + 1e-9,
             $"Arithmetic put price {arith.Price:F6} must be ≤ geometric put price {geo.Price:F6} " +
@@ -96,8 +99,9 @@ public sealed class EQAsianOptionMCPricerTests
         var average  = path.Average();
         var expected = Math.Exp(-R * T) * Math.Max(average - K, 0.0);
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildPricer(S0, K, T, sigma: 0.0, R, Q, AsianAveragingMethod.Arithmetic, AsianStrikeStyle.AveragePrice, isCall: true, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, R, Q);
+        var mc     = BuildPricer(S0, K, T, sigma: 0.0, R, Q, AsianAveragingMethod.Arithmetic, AsianStrikeStyle.AveragePrice, isCall: true, cube).Price(market);
 
         Assert.Equal(expected, mc.Price, precision: 10);
     }
@@ -109,8 +113,9 @@ public sealed class EQAsianOptionMCPricerTests
         var average  = Math.Exp(path.Select(x => Math.Log(x)).Average());
         var expected = Math.Exp(-R * T) * Math.Max(average - K, 0.0);
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildPricer(S0, K, T, sigma: 0.0, R, Q, AsianAveragingMethod.Geometric, AsianStrikeStyle.AveragePrice, isCall: true, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, R, Q);
+        var mc     = BuildPricer(S0, K, T, sigma: 0.0, R, Q, AsianAveragingMethod.Geometric, AsianStrikeStyle.AveragePrice, isCall: true, cube).Price(market);
 
         Assert.Equal(expected, mc.Price, precision: 10);
     }
@@ -124,8 +129,9 @@ public sealed class EQAsianOptionMCPricerTests
         var terminal = path[^1];
         var expected = Math.Exp(-R * T) * Math.Max(terminal - average, 0.0);
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildPricer(S0, strike: 0.0, T, sigma: 0.0, R, Q, AsianAveragingMethod.Arithmetic, AsianStrikeStyle.AverageStrike, isCall: true, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, R, Q);
+        var mc     = BuildPricer(S0, strike: 0.0, T, sigma: 0.0, R, Q, AsianAveragingMethod.Arithmetic, AsianStrikeStyle.AverageStrike, isCall: true, cube).Price(market);
 
         Assert.Equal(expected, mc.Price, precision: 10);
     }
@@ -145,9 +151,8 @@ public sealed class EQAsianOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Vanilla       = new VanillaOption()
         };
-        var market = MakeMarket(S0, R, Q);
         Assert.Throws<ArgumentException>(() =>
-            new EQAsianOptionMCPricer(vanillaOpt, ValuationDate, market, Sigma, cube));
+            new EQAsianOptionMCPricer(vanillaOpt, ValuationDate, Sigma, cube));
     }
 
     [Fact]
@@ -163,9 +168,8 @@ public sealed class EQAsianOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Asian         = new AsianOption { StrikeStyle = AsianStrikeStyle.AveragePrice }
         };
-        var market = MakeMarket(S0, R, Q);
         Assert.Throws<ArgumentException>(() =>
-            new EQAsianOptionMCPricer(option, ValuationDate, market, Sigma, cube));
+            new EQAsianOptionMCPricer(option, ValuationDate, Sigma, cube));
     }
 
     [Fact]
@@ -181,9 +185,8 @@ public sealed class EQAsianOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Asian         = new AsianOption { AveragingMethod = AsianAveragingMethod.Arithmetic }
         };
-        var market = MakeMarket(S0, R, Q);
         Assert.Throws<ArgumentException>(() =>
-            new EQAsianOptionMCPricer(option, ValuationDate, market, Sigma, cube));
+            new EQAsianOptionMCPricer(option, ValuationDate, Sigma, cube));
     }
 
     [Fact]
@@ -200,9 +203,10 @@ public sealed class EQAsianOptionMCPricerTests
         double spot, double strike, double expiry, double sigma,
         double r, double q, bool isCall)
     {
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc = BuildPricer(spot, strike, expiry, sigma, r, q,
-            AsianAveragingMethod.Geometric, AsianStrikeStyle.AveragePrice, isCall, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(spot, r, q);
+        var mc     = BuildPricer(spot, strike, expiry, sigma, r, q,
+            AsianAveragingMethod.Geometric, AsianStrikeStyle.AveragePrice, isCall, cube).Price(market);
         var kv = GeometricAsian.Price(spot, strike, expiry, sigma, r, q, observations: Steps, isCall);
         return (mc, kv);
     }
@@ -221,8 +225,7 @@ public sealed class EQAsianOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Asian         = new AsianOption { AveragingMethod = averagingMethod, StrikeStyle = strikeStyle }
         };
-        var market = MakeMarket(spot, r, q);
-        return new EQAsianOptionMCPricer(option, ValuationDate, market, sigma, cube);
+        return new EQAsianOptionMCPricer(option, ValuationDate, sigma, cube);
     }
 
     private static EqMarketData MakeMarket(double spot, double r, double q) =>

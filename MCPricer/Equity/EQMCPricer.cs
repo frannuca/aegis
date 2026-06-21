@@ -1,5 +1,6 @@
 using Aegis.Instruments;
 using RandomSimulator;
+using NodaTime;
 
 namespace MCPricer.Equity;
 
@@ -49,7 +50,7 @@ public abstract class EQMCPricer : MCBasePricer
 {
     protected readonly EqMarketData Market;
     protected readonly Option       OptionDef;
-    protected readonly DateOnly     ValuationDate;
+    protected readonly LocalDate     ValuationDate;
     protected readonly double       Dt;
     protected readonly double       Volatility;
     protected readonly double       DiscountFactor;
@@ -74,7 +75,7 @@ public abstract class EQMCPricer : MCBasePricer
 
     protected EQMCPricer(
         Option         option,
-        DateOnly       valuationDate,
+        LocalDate       valuationDate,
         EqMarketData   market,
         double         volatility,
         SimulationCube cube) : base(cube)

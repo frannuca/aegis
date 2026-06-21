@@ -1,6 +1,7 @@
 using Aegis.Instruments;
 using MCPricer.FX;
 using RandomSimulator;
+using NodaTime;
 
 namespace MCPricer.Tests;
 
@@ -45,14 +46,13 @@ public sealed class FXBasketBarrierOptionMCPricerTests
     private const double Rd    = 0.05;
     private const double Rf    = 0.02;
     private const double H_Up  = 1.30;
-    private const double H_Down = 0.90;
 
     private const int Paths = 100_000;
     private const int Steps = 50;
     private const int Seed  = 42;
 
-    private static readonly DateOnly ValuationDate = new(2026, 1, 1);
-    private static readonly DateOnly CurveMaturity = new(2036, 1, 1);
+    private static readonly LocalDate ValuationDate = new(2026, 1, 1);
+    private static readonly LocalDate CurveMaturity = new(2036, 1, 1);
 
     // ── 1. Single-leg basket degenerates to FXBarrierOptionMCPricer ──────────
 
@@ -87,16 +87,15 @@ public sealed class FXBasketBarrierOptionMCPricerTests
     private (PricingResult basket, PricingResult single) RunSingleLegComparison(
         BasketAggregationMethod method, BarrierObservation observation)
     {
-        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, assets: 1, Seed);
-        var market = MakeMarket("EURUSD", S0, Rd, Rf);
-
-        var basketOption = MakeBasketBarrierOption(
-            legs: [("EURUSD", 1.0)], method, K, isCall: true, H_Up, BarrierType.UpAndOut, observation);
+        var cube    = SimulationCube.GenerateIndependent(Paths, Steps, assets: 1, Seed);
+        var market  = MakeMarket("EURUSD", S0, Rd, Rf);
         var markets = new Dictionary<string, FxMarketData> { ["EURUSD"] = market };
         var vols    = new Dictionary<string, double> { ["EURUSD"] = Sigma };
 
-        using var basketPricer = new FXBasketBarrierOptionMCPricer(basketOption, ValuationDate, markets, vols, cube);
-        var basketResult = basketPricer.Price();
+        var basketOption = MakeBasketBarrierOption(
+            legs: [("EURUSD", 1.0)], method, K, isCall: true, H_Up, BarrierType.UpAndOut, observation);
+        using var basketPricer = new FXBasketBarrierOptionMCPricer(basketOption, ValuationDate, cube);
+        var basketResult = basketPricer.Price(markets, vols);
 
         var singleOption = new Option
         {
@@ -113,8 +112,8 @@ public sealed class FXBasketBarrierOptionMCPricerTests
                 Rebate       = 0.0
             }
         };
-        using var singlePricer = new FXBarrierOptionMCPricer(singleOption, ValuationDate, market, Sigma, cube);
-        var singleResult = singlePricer.Price();
+        using var singlePricer = new FXBarrierOptionMCPricer(singleOption, ValuationDate, Sigma, cube);
+        var singleResult = singlePricer.Price(market);
 
         return (basketResult, singleResult);
     }
@@ -157,15 +156,15 @@ public sealed class FXBasketBarrierOptionMCPricerTests
 
         var vanilla = new FXBasketVanillaMCPricer(
             MakeBasketOption(legSpec, BasketAggregationMethod.WeightedSum, strike, isCall),
-            ValuationDate, legs.markets, legs.vols, cube).Price();
+            ValuationDate, cube).Price(legs.markets, legs.vols);
 
         var ki = new FXBasketBarrierOptionMCPricer(
             MakeBasketBarrierOption(legSpec, BasketAggregationMethod.WeightedSum, strike, isCall, h, kiType, observation, rebate: 0.0),
-            ValuationDate, legs.markets, legs.vols, cube).Price();
+            ValuationDate, cube).Price(legs.markets, legs.vols);
 
         var ko = new FXBasketBarrierOptionMCPricer(
             MakeBasketBarrierOption(legSpec, BasketAggregationMethod.WeightedSum, strike, isCall, h, koType, observation, rebate: 0.0),
-            ValuationDate, legs.markets, legs.vols, cube).Price();
+            ValuationDate, cube).Price(legs.markets, legs.vols);
 
         // Same cube ⇒ same per-path level trajectories ⇒ same per-path barrier-hit
         // determinations for KI and KO ⇒ KI + KO = Vanilla exactly, up to float rounding.
@@ -190,12 +189,12 @@ public sealed class FXBasketBarrierOptionMCPricerTests
         var levelT   = w1 * s1T + w2 * s2T;
         var expected = Math.Exp(-rd * T) * Math.Max(levelT - strike, 0.0);
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, assets: 2, Seed);
+        var cube    = SimulationCube.GenerateIndependent(Paths, Steps, assets: 2, Seed);
         var legSpec = new (string, double)[] { ("EURUSD", w1), ("GBPUSD", w2) };
         var mc = new FXBasketBarrierOptionMCPricer(
             MakeBasketBarrierOption(legSpec, BasketAggregationMethod.WeightedSum, strike, isCall: true,
                 barrier, BarrierType.UpAndOut, BarrierObservation.Discrete),
-            ValuationDate, legs.markets, legs.vols, cube).Price();
+            ValuationDate, cube).Price(legs.markets, legs.vols);
 
         Assert.Equal(expected, mc.Price, precision: 10);
     }
@@ -213,12 +212,12 @@ public sealed class FXBasketBarrierOptionMCPricerTests
         var levelT   = w1 * s1T + w2 * s2T;
         var expected = Math.Exp(-rd * T) * Math.Max(levelT - strike, 0.0);
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, assets: 2, Seed);
+        var cube    = SimulationCube.GenerateIndependent(Paths, Steps, assets: 2, Seed);
         var legSpec = new (string, double)[] { ("EURUSD", w1), ("GBPUSD", w2) };
         var mc = new FXBasketBarrierOptionMCPricer(
             MakeBasketBarrierOption(legSpec, BasketAggregationMethod.WeightedSum, strike, isCall: true,
                 barrier, BarrierType.DownAndIn, BarrierObservation.Discrete),
-            ValuationDate, legs.markets, legs.vols, cube).Price();
+            ValuationDate, cube).Price(legs.markets, legs.vols);
 
         Assert.Equal(expected, mc.Price, precision: 10);
     }
@@ -231,12 +230,12 @@ public sealed class FXBasketBarrierOptionMCPricerTests
         var legs = BuildTwoZeroVolLegs(out _, out _, out _);
         const double w1 = 0.5, w2 = 0.5, strike = 1.18, barrier = 1.30;
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, assets: 2, Seed);
+        var cube    = SimulationCube.GenerateIndependent(Paths, Steps, assets: 2, Seed);
         var legSpec = new (string, double)[] { ("EURUSD", w1), ("GBPUSD", w2) };
         var mc = new FXBasketBarrierOptionMCPricer(
             MakeBasketBarrierOption(legSpec, BasketAggregationMethod.WeightedSum, strike, isCall: true,
                 barrier, BarrierType.UpAndIn, BarrierObservation.Discrete),
-            ValuationDate, legs.markets, legs.vols, cube).Price();
+            ValuationDate, cube).Price(legs.markets, legs.vols);
 
         Assert.Equal(0.0, mc.Price, precision: 10);
     }
@@ -259,11 +258,11 @@ public sealed class FXBasketBarrierOptionMCPricerTests
         var barrier = new FXBasketBarrierOptionMCPricer(
             MakeBasketBarrierOption(legSpec, BasketAggregationMethod.WeightedSum, strike, isCall: true,
                 barrierLevel: 100.0, BarrierType.UpAndOut, BarrierObservation.Discrete),
-            ValuationDate, legs.markets, legs.vols, cube).Price();
+            ValuationDate, cube).Price(legs.markets, legs.vols);
 
         var vanilla = new FXBasketVanillaMCPricer(
             MakeBasketOption(legSpec, BasketAggregationMethod.WeightedSum, strike, isCall: true),
-            ValuationDate, legs.markets, legs.vols, cube).Price();
+            ValuationDate, cube).Price(legs.markets, legs.vols);
 
         AssertWithinMcBounds(barrier, vanilla.Price, sigma: 5.0);
     }
@@ -283,66 +282,51 @@ public sealed class FXBasketBarrierOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Barrier = new BarrierOption { BarrierLevel = H_Up, BarrierType = BarrierType.UpAndOut, Observation = BarrierObservation.Discrete }
         };
-        var markets = new Dictionary<string, FxMarketData> { ["EURUSD"] = MakeMarket("EURUSD", S0, Rd, Rf) };
-        var vols    = new Dictionary<string, double> { ["EURUSD"] = Sigma };
-
         Assert.Throws<ArgumentException>(() =>
-            new FXBasketBarrierOptionMCPricer(option, ValuationDate, markets, vols, cube));
+            new FXBasketBarrierOptionMCPricer(option, ValuationDate, cube));
     }
 
     [Fact]
     public void NonBarrierKind_Throws()
     {
-        var cube = SimulationCube.GenerateIndependent(100, Steps, assets: 1, Seed);
+        var cube    = SimulationCube.GenerateIndependent(100, Steps, assets: 1, Seed);
         var legSpec = new (string, double)[] { ("EURUSD", 1.0) };
-        var option = MakeBasketOption(legSpec, BasketAggregationMethod.WeightedSum, K, isCall: true); // Vanilla, not Barrier
-        var markets = new Dictionary<string, FxMarketData> { ["EURUSD"] = MakeMarket("EURUSD", S0, Rd, Rf) };
-        var vols    = new Dictionary<string, double> { ["EURUSD"] = Sigma };
-
+        var option  = MakeBasketOption(legSpec, BasketAggregationMethod.WeightedSum, K, isCall: true); // Vanilla, not Barrier
         Assert.Throws<ArgumentException>(() =>
-            new FXBasketBarrierOptionMCPricer(option, ValuationDate, markets, vols, cube));
+            new FXBasketBarrierOptionMCPricer(option, ValuationDate, cube));
     }
 
     [Fact]
     public void UnspecifiedBarrierType_Throws()
     {
-        var cube = SimulationCube.GenerateIndependent(100, Steps, assets: 1, Seed);
+        var cube    = SimulationCube.GenerateIndependent(100, Steps, assets: 1, Seed);
         var legSpec = new (string, double)[] { ("EURUSD", 1.0) };
-        var option = MakeBasketBarrierOption(legSpec, BasketAggregationMethod.WeightedSum, K, isCall: true,
+        var option  = MakeBasketBarrierOption(legSpec, BasketAggregationMethod.WeightedSum, K, isCall: true,
             H_Up, BarrierType.Unspecified, BarrierObservation.Discrete);
-        var markets = new Dictionary<string, FxMarketData> { ["EURUSD"] = MakeMarket("EURUSD", S0, Rd, Rf) };
-        var vols    = new Dictionary<string, double> { ["EURUSD"] = Sigma };
-
         Assert.Throws<ArgumentException>(() =>
-            new FXBasketBarrierOptionMCPricer(option, ValuationDate, markets, vols, cube));
+            new FXBasketBarrierOptionMCPricer(option, ValuationDate, cube));
     }
 
     [Fact]
     public void UnspecifiedObservation_Throws()
     {
-        var cube = SimulationCube.GenerateIndependent(100, Steps, assets: 1, Seed);
+        var cube    = SimulationCube.GenerateIndependent(100, Steps, assets: 1, Seed);
         var legSpec = new (string, double)[] { ("EURUSD", 1.0) };
-        var option = MakeBasketBarrierOption(legSpec, BasketAggregationMethod.WeightedSum, K, isCall: true,
+        var option  = MakeBasketBarrierOption(legSpec, BasketAggregationMethod.WeightedSum, K, isCall: true,
             H_Up, BarrierType.UpAndOut, BarrierObservation.Unspecified);
-        var markets = new Dictionary<string, FxMarketData> { ["EURUSD"] = MakeMarket("EURUSD", S0, Rd, Rf) };
-        var vols    = new Dictionary<string, double> { ["EURUSD"] = Sigma };
-
         Assert.Throws<ArgumentException>(() =>
-            new FXBasketBarrierOptionMCPricer(option, ValuationDate, markets, vols, cube));
+            new FXBasketBarrierOptionMCPricer(option, ValuationDate, cube));
     }
 
     [Fact]
     public void ZeroBarrierLevel_Throws()
     {
-        var cube = SimulationCube.GenerateIndependent(100, Steps, assets: 1, Seed);
+        var cube    = SimulationCube.GenerateIndependent(100, Steps, assets: 1, Seed);
         var legSpec = new (string, double)[] { ("EURUSD", 1.0) };
-        var option = MakeBasketBarrierOption(legSpec, BasketAggregationMethod.WeightedSum, K, isCall: true,
+        var option  = MakeBasketBarrierOption(legSpec, BasketAggregationMethod.WeightedSum, K, isCall: true,
             barrierLevel: 0.0, BarrierType.UpAndOut, BarrierObservation.Discrete);
-        var markets = new Dictionary<string, FxMarketData> { ["EURUSD"] = MakeMarket("EURUSD", S0, Rd, Rf) };
-        var vols    = new Dictionary<string, double> { ["EURUSD"] = Sigma };
-
         Assert.Throws<ArgumentException>(() =>
-            new FXBasketBarrierOptionMCPricer(option, ValuationDate, markets, vols, cube));
+            new FXBasketBarrierOptionMCPricer(option, ValuationDate, cube));
     }
 
     [Fact]
@@ -356,30 +340,20 @@ public sealed class FXBasketBarrierOptionMCPricerTests
             OptionType = OptionType.Call, ExerciseStyle = ExerciseStyle.European,
             Barrier = new BarrierOption { BarrierLevel = H_Up, BarrierType = BarrierType.UpAndOut, Observation = BarrierObservation.Discrete }
         };
-        var markets = new Dictionary<string, FxMarketData>();
-        var vols    = new Dictionary<string, double>();
-
         Assert.Throws<ArgumentException>(() =>
-            new FXBasketBarrierOptionMCPricer(option, ValuationDate, markets, vols, cube));
+            new FXBasketBarrierOptionMCPricer(option, ValuationDate, cube));
     }
 
     [Fact]
     public void CubeAssetCountMismatch_Throws()
     {
         // Two legs declared, but the cube carries only one correlated factor.
-        var cube = SimulationCube.GenerateIndependent(100, Steps, assets: 1, Seed);
+        var cube    = SimulationCube.GenerateIndependent(100, Steps, assets: 1, Seed);
         var legSpec = new (string, double)[] { ("EURUSD", 0.5), ("GBPUSD", 0.5) };
-        var option = MakeBasketBarrierOption(legSpec, BasketAggregationMethod.WeightedSum, K, isCall: true,
+        var option  = MakeBasketBarrierOption(legSpec, BasketAggregationMethod.WeightedSum, K, isCall: true,
             H_Up, BarrierType.UpAndOut, BarrierObservation.Discrete);
-        var markets = new Dictionary<string, FxMarketData>
-        {
-            ["EURUSD"] = MakeMarket("EURUSD", S0,   Rd, Rf),
-            ["GBPUSD"] = MakeMarket("GBPUSD", 1.25, Rd, 0.01)
-        };
-        var vols = new Dictionary<string, double> { ["EURUSD"] = Sigma, ["GBPUSD"] = 0.25 };
-
         Assert.Throws<ArgumentException>(() =>
-            new FXBasketBarrierOptionMCPricer(option, ValuationDate, markets, vols, cube));
+            new FXBasketBarrierOptionMCPricer(option, ValuationDate, cube));
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

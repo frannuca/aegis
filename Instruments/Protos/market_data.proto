@@ -51,18 +51,30 @@ message FxMarketData {
   VolatilitySurface vol_surface   = 5;
 }
 
+// A scheduled discrete cash dividend payment.
+// ex_date: ISO-8601 date on which the stock goes ex-dividend ("yyyy-MM-dd").
+// amount: absolute cash dividend per share, in the same currency as the spot.
+message CashDividend {
+  string ex_date = 1;
+  double amount  = 2;
+}
+
 // Equity market data (Black-Scholes / GBM model inputs).
 // Under risk-neutral measure: dS/S = (r - q) dt + σ dW.
 //
 // risk_free_rate / dividend_yield are term structures (Pillars): each pricer
 // interpolates the curve at the option's expiry to obtain a single effective
 // continuously-compounded rate / yield r(T), q(T) — see ZeroCurve.InterpolateRate.
+//
+// dividends: optional discrete cash dividend schedule, applied in addition to
+// the continuous dividend_yield — see GbmOptionMCPricer for the jump model.
 message EqMarketData {
   string            ticker         = 1;  // e.g. "SPX", "AAPL"
   double            spot           = 2;  // current price
   Pillars           risk_free_rate = 3;  // risk-free zero-rate curve
   Pillars           dividend_yield = 4;  // continuous dividend-yield curve
   VolatilitySurface vol_surface    = 5;
+  repeated CashDividend dividends  = 6;  // discrete cash dividends (optional)
 }
 
 // Interest rate market data.

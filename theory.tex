@@ -1,0 +1,935 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{tocloft}
+\usepackage{microtype}
+\usepackage{parskip}
+
+\geometry{margin=2.5cm, headheight=14pt}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  urlcolor=blue!60!black,
+  pdfauthor={Aegis Quant},
+  pdftitle={Aegis Quant Pricing Engine -- Theoretical Background}
+}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{gray},
+  breaklines=true,
+  frame=single,
+  backgroundcolor=\color{gray!8},
+  language=[Sharp]C,
+  showstringspaces=false
+}
+
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Q}{\mathbb{Q}}
+\newcommand{\QT}{\mathbb{Q}^T}
+\newcommand{\Qd}{\mathbb{Q}^d}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathcal{N}}
+\newcommand{\F}{\mathcal{F}}
+\newcommand{\coderef}[1]{\texttt{\color{blue!60!black}#1}}
+
+\theoremstyle{definition}
+\newtheorem{defn}{Definition}[section]
+\newtheorem{prop}{Proposition}[section]
+\newtheorem{remark}{Remark}[section]
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\textit{Aegis Quant -- Theory}}
+\lhead{\leftmark}
+\cfoot{\thepage}
+
+\title{\textbf{Aegis Quant Pricing Engine}\\[0.4em]
+       \large Theoretical Background and Mathematical Derivations}
+\author{Aegis Quant Library}
+\date{June 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%%==========================================================================
+\section{Introduction}
+%%==========================================================================
+
+This document provides the mathematical foundations underlying every model,
+analytical formula, and Monte Carlo simulation implemented in the Aegis
+quant pricing engine.  Each section states the stochastic process, the
+probability measure, the key assumptions, and the derivation of the pricing
+formula, with explicit references to the C\# source files where the
+corresponding implementation lives.
+
+The library prices:
+\begin{itemize}[nosep]
+  \item Vanilla and exotic FX options (Garman-Kohlhagen, SABR, barriers, Asians, digitals, baskets)
+  \item Vanilla and exotic equity options (Black-Scholes-Merton, barriers, Asians, digitals)
+  \item SABR-based barrier options under the T-forward measure
+\end{itemize}
+
+%%==========================================================================
+\section{Probability Measures and the Change-of-Numeraire Theorem}
+\label{sec:measures}
+%%==========================================================================
+
+\subsection{Numeraires and equivalent martingale measures}
+
+Let $(\Omega,\F,\{\F_t\},P)$ be a filtered probability space satisfying the
+usual conditions.  A \emph{numeraire} is any strictly positive $\F_t$-adapted
+price process $N(t)$.
+
+\begin{defn}[Equivalent martingale measure (EMM)]
+A probability measure $\Q\sim P$ is an EMM associated with numeraire $N$ if
+every asset price $V(t)$ (after dividing by $N$) is a local $\Q$-martingale:
+\[
+  \frac{V(t)}{N(t)} = \E^\Q\!\left[\frac{V(T)}{N(T)}\,\Big|\,\F_t\right].
+\]
+\end{defn}
+
+Absence of arbitrage is equivalent (under integrability conditions) to the
+existence of at least one EMM.
+
+\subsection{The risk-neutral measure $\Q$}
+
+The most common choice of numeraire is the \emph{domestic money-market account}
+$B(t)=\exp\!\bigl(\int_0^t r(s)\,\dd s\bigr)$ with $r$ the short rate.  The
+associated EMM is the \emph{risk-neutral measure} $\Q$.  Under a flat rate $r$:
+\[
+  V(0) = e^{-rT}\,\E^\Q[V(T)].
+\]
+
+For FX, the domestic money-market account $B^d$ denominates prices in the
+domestic currency (e.g.\ USD); for equity it is the risk-free bank account.
+Code reference: \coderef{GbmOptionMCPricer.cs} (\texttt{DiscountFactor}
+computed as $e^{-r_d T}$).
+
+\subsection{The T-forward measure $\QT$}
+
+The \emph{T-forward measure} (or \emph{T-annuity measure}) uses the zero-coupon
+domestic bond $P(t,T)$ as numeraire.  By the change-of-numeraire theorem, if
+$\Q$ is the risk-neutral measure:
+\[
+  \frac{\dd\QT}{\dd\Q}\bigg|_{\F_T}
+  = \frac{P(0,T)^{-1}}{P(T,T)^{-1}}\cdot\frac{B(0)}{B(T)}
+  = \frac{P(0,T)^{-1}}{1}\cdot e^{-rT}
+  = 1 \quad\text{(flat rates, }P(0,T)=e^{-rT}\text{)}.
+\]
+
+Under flat rates the two measures coincide \emph{for terminal payoffs}, so
+\[
+  V(0) = P(0,T)\,\E^T[V(T)].
+\]
+
+The key property is that any traded forward $F(t,T)=S(t)/P(t,T)$ is a
+$\QT$-martingale.  This makes the $\QT$-measure the natural setting for
+pricing futures and forward-settled payoffs: no drift term appears in the
+forward's SDE.  Code reference: \coderef{FXSABRMCPricer.cs} (SABR simulated
+under $\QT$; \texttt{DiscountFactor}$=e^{-r_d T}$,
+\texttt{InitialForward}$=S_0 e^{(r_d-r_f)T}$).
+
+%%==========================================================================
+\section{Geometric Brownian Motion and the It\^{o} Formula}
+\label{sec:gbm}
+%%==========================================================================
+
+\subsection{The GBM SDE and its solution}
+
+The spot process $S$ satisfies under $\Q$:
+\[
+  \frac{\dd S}{S} = \mu\,\dd t + \sigma\,\dd W^\Q,
+\]
+where $W^\Q$ is a $\Q$-Brownian motion.  Applying It\^{o}'s lemma to
+$X=\ln S$:
+\[
+  \dd X = \dd\ln S = \frac{1}{S}\,\dd S - \frac{1}{2S^2}\,(\dd S)^2
+  = \Bigl(\mu - \tfrac{1}{2}\sigma^2\Bigr)\dd t + \sigma\,\dd W^\Q.
+\]
+Integrating:
+\[
+  \boxed{S(T) = S(0)\exp\!\Bigl[\Bigl(\mu-\tfrac{1}{2}\sigma^2\Bigr)T + \sigma W^\Q(T)\Bigr].}
+\]
+The $-\frac{1}{2}\sigma^2$ correction is the \emph{It\^{o} correction}
+(convexity adjustment).  Under $\Q$ one sets $\mu = r_d - r_f$ (FX) or
+$\mu = r - q$ (equity).
+
+\subsection{Log-Euler discretization}
+
+Applying the exact formula over a time step $[t_i,t_{i+1}]$ of length
+$\Delta t$:
+\[
+  S(t_{i+1}) = S(t_i)\exp\!\Bigl[\bigl(f_d(t_i,t_{i+1})-f_c(t_i,t_{i+1})-\tfrac{1}{2}\sigma^2\bigr)\Delta t
+  + \sigma\sqrt{\Delta t}\,Z_i\Bigr],
+  \quad Z_i\sim\N(0,1),
+\]
+where $f_d,f_c$ are the instantaneous forward rates from the respective curves.
+This is \emph{exact} for GBM (no discretization error), which is why the
+Aegis MC pricers use log-Euler rather than plain Euler.
+
+Code reference: \coderef{GbmOptionMCPricer.cs}, method
+\texttt{SimulateSpotPath}.
+
+%%==========================================================================
+\section{The FX Forward Measure and the Driftless Forward}
+\label{sec:fx_forward}
+%%==========================================================================
+
+\subsection{FX covered-interest parity}
+
+Let $S(t)$ be the spot FX rate (domestic per unit foreign, e.g.\ USD/EUR).
+The foreign money-market account $B^f(t)=e^{r_f t}$ is a domestic asset with
+price $S(t)B^f(t)$ in domestic currency.  Absence of arbitrage requires:
+\[
+  F(0,T) = S(0)\,\frac{B^d(T)}{B^f(T)} = S(0)\,e^{(r_d-r_f)T}.
+\]
+This is \emph{covered-interest parity}.  Code:
+\coderef{FXSABRMCPricer.cs} (\texttt{InitialForward}), and
+\coderef{GbmOptionMCPricer.cs} (implicit via drift $r_d - r_f$).
+
+\subsection{Derivation: the forward is driftless under $\QT$}
+
+Under the domestic risk-neutral measure $\Qd$:
+\[
+  \frac{\dd S}{S} = (r_d - r_f)\,\dd t + \sigma\,\dd W^d.
+\]
+The T-forward is $F(t,T)=S(t)/P^d(t,T)$.  Under flat rates
+$P^d(t,T)=e^{-r_d(T-t)}$, so $F(t,T)=S(t)e^{r_d(T-t)}\cdot e^{-r_d(T-t)+r_f(T-t)}\cdots$
+More precisely, applying It\^{o}'s lemma to $F=S\,e^{(r_d-r_f)(T-t)}$ under
+$\Qd$:
+
+\begin{align*}
+  \dd F &= e^{(r_d-r_f)(T-t)}\dd S - (r_d-r_f)\,S\,e^{(r_d-r_f)(T-t)}\dd t \\
+        &= e^{(r_d-r_f)(T-t)}\bigl[(r_d-r_f)S\,\dd t + \sigma S\,\dd W^d\bigr]
+           -(r_d-r_f)S\,e^{(r_d-r_f)(T-t)}\dd t \\
+        &= \sigma F\,\dd W^d.
+\end{align*}
+
+The drift cancels exactly.  This confirms $F(t,T)$ is a $\Qd$-local
+martingale (and hence a $\QT$-martingale by the equivalence of the two
+measures under flat rates).  Under $\QT$:
+\[
+  \boxed{\frac{\dd F}{F} = \sigma\,\dd W^T,\qquad \text{(no drift term).}}
+\]
+
+This is why \coderef{FXSABRMCPricer.cs} sets the drift to zero for the
+forward process: ``\emph{Under the T-forward measure, the forward F is a
+martingale --- no drift term.}''
+
+\subsection{Pricing FX options in each measure}
+
+The same European call price can be written in two equivalent ways:
+\begin{align*}
+  C &= e^{-r_d T}\,\E^d[\max(S(T)-K,0)] \tag{risk-neutral on $S$}\\
+    &= e^{-r_d T}\,\E^T[\max(F(T)-K,0)] \tag{T-forward on $F$, same terminal value}
+\end{align*}
+Both representations are used in Aegis:
+\begin{itemize}[nosep]
+  \item \coderef{GarmanKohlhagen.cs} uses the risk-neutral representation (on $S$).
+  \item \coderef{FXSABRMCPricer.cs} and \coderef{FXSABRVanillaOptionMCPricer.cs} use the T-forward representation (on $F$).
+  \item \coderef{BlackForward.cs} prices the T-forward payoff without discounting.
+\end{itemize}
+
+%%==========================================================================
+\section{Garman-Kohlhagen Formula}
+\label{sec:gk}
+%%==========================================================================
+
+\subsection{Model}
+
+Under the domestic risk-neutral measure $\Qd$:
+\[
+  \frac{\dd S}{S} = (r_d - r_f)\,\dd t + \sigma\,\dd W^d.
+\]
+
+\subsection{Formula derivation}
+
+By the risk-neutral pricing formula:
+\[
+  C = e^{-r_d T}\,\E^d[\max(S(T)-K,0)].
+\]
+Write $S(T)=S_0\exp\bigl[(r_d-r_f-\tfrac{1}{2}\sigma^2)T+\sigma\sqrt{T}\,Z\bigr]$ with $Z\sim\N(0,1)$.
+Let $d_1,d_2$ be defined by the boundary $S(T)=K$ in $Z$-space:
+\[
+  d_1 = \frac{\ln(S_0/K)+(r_d-r_f+\tfrac{1}{2}\sigma^2)T}{\sigma\sqrt{T}},
+  \qquad d_2 = d_1 - \sigma\sqrt{T}.
+\]
+A standard Gaussian integration (splitting the expectation into
+``asset term'' and ``cash term'') gives:
+\[
+  \boxed{C = S_0\,e^{-r_f T}\,\Phi(d_1) - K\,e^{-r_d T}\,\Phi(d_2),}
+\]
+\[
+  P = K\,e^{-r_d T}\,\Phi(-d_2) - S_0\,e^{-r_f T}\,\Phi(-d_1).
+\]
+
+Code: \coderef{GarmanKohlhagen.cs}, \texttt{Price()}.
+
+\textbf{Edge case.} At $\sigma=0$ the path is deterministic, $S(T)=F=S_0e^{(r_d-r_f)T}$,
+and the price collapses to the discounted intrinsic:
+$e^{-r_d T}\max(\phi(F-K),0)$.
+
+%%==========================================================================
+\section{Black-Scholes-Merton Formula (Equity)}
+\label{sec:bsm}
+%%==========================================================================
+
+The equity model is structurally identical to Garman-Kohlhagen with the
+substitutions $r_f\to q$ (dividend yield) and $r_d\to r$:
+\[
+  \frac{\dd S}{S} = (r - q)\,\dd t + \sigma\,\dd W,
+\]
+giving:
+\[
+  C = S_0\,e^{-qT}\,\Phi(d_1) - K\,e^{-rT}\,\Phi(d_2),
+  \quad d_1=\frac{\ln(S_0/K)+(r-q+\tfrac{1}{2}\sigma^2)T}{\sigma\sqrt{T}}.
+\]
+
+Code: \coderef{BlackScholes.cs}, \texttt{Price()};
+\coderef{GbmOptionMCPricer.cs} (Monte Carlo path generation with
+$r_{\mathrm{discount}}=r$, $r_{\mathrm{carry}}=q$).
+
+%%==========================================================================
+\section{Black Forward Formula}
+\label{sec:black_fwd}
+%%==========================================================================
+
+Under the T-forward measure $\QT$ the forward satisfies $\dd F/F=\sigma\,\dd W^T$
+(driftless), with $F(T)=F_0\exp\bigl(-\tfrac{1}{2}\sigma^2 T+\sigma\sqrt{T}\,Z\bigr)$.
+The undiscounted European payoff:
+\[
+  C_{\rm fwd} = \E^T[\max(F(T)-K,0)]
+              = F_0\,\Phi(d_1^F) - K\,\Phi(d_2^F),
+\]
+\[
+  d_1^F = \frac{\ln(F_0/K)+\tfrac{1}{2}\sigma^2 T}{\sigma\sqrt{T}},
+  \qquad d_2^F = d_1^F - \sigma\sqrt{T}.
+\]
+The full price is $P(0,T)\cdot C_{\rm fwd}$.  Note $d_1^F$ differs from
+GK's $d_1$ only by the forward substitution $F_0\equiv S_0 e^{(r_d-r_f)T}$ and
+the absence of the rate terms inside the logarithm.
+
+Code: \coderef{BlackForward.cs}, \texttt{Call()}, \texttt{Put()}.
+Used as the lognormal-SABR ($\beta=1$, $\nu>0$) benchmark in
+\coderef{FXSABRVanillaOptionMCPricerTests.cs}.
+
+%%==========================================================================
+\section{Bachelier (Normal) Model}
+\label{sec:bachelier}
+%%==========================================================================
+
+The normal model replaces the lognormal GBM with arithmetic Brownian motion:
+\[
+  \dd F = \sigma_N\,\dd W^T,
+\]
+so $F(T) = F_0 + \sigma_N\sqrt{T}\,Z$.  The European option price is:
+\[
+  \boxed{C = P(0,T)\bigl[(F_0-K)\,\Phi(d) + \sigma_N\sqrt{T}\,\phi(d)\bigr],}
+\]
+\[
+  P_{\rm bch} = P(0,T)\bigl[(K-F_0)\,\Phi(-d) + \sigma_N\sqrt{T}\,\phi(d)\bigr],
+\]
+where $d=(F_0-K)/(\sigma_N\sqrt{T})$ and $\phi$ is the standard normal PDF.
+
+This can be derived by direct Gaussian integration:
+\begin{align*}
+  C &= P(0,T)\int_{(K-F_0)/(\sigma_N\sqrt{T})}^{\infty}
+       \bigl(F_0+\sigma_N\sqrt{T}\,z-K\bigr)\phi(z)\,\dd z.
+\end{align*}
+Splitting: $(F_0-K)\Phi(-d_{\rm lower})+\sigma_N\sqrt{T}\,\phi(d_{\rm lower})$
+where $d_{\rm lower}=-d$, and using $\phi(d)=\phi(-d)$ gives the stated formula.
+
+\textbf{Usage in Aegis.} $\sigma_N$ is the \emph{normal volatility} (in
+forward units per $\sqrt{\text{year}}$).  Code: \coderef{Bachelier.cs},
+\texttt{Price()}.  Used as the analytical benchmark for normal-SABR ($\beta=0$)
+in \coderef{FXSABRVanillaOptionMCPricerTests.cs}.
+
+%%==========================================================================
+\section{Digital Options}
+\label{sec:digital}
+%%==========================================================================
+
+\subsection{Cash-or-nothing}
+
+Pays a fixed amount $Q$ if $S(T)>K$ (call) or $S(T)<K$ (put):
+\[
+  \mathrm{CoN\_Call} = e^{-rT}\,Q\,\Phi(d_2),
+  \qquad
+  \mathrm{CoN\_Put}  = e^{-rT}\,Q\,\Phi(-d_2).
+\]
+This follows immediately from $\E^Q[\mathbf{1}_{S(T)>K}]=\Phi(d_2)$, which
+is the ``cash term'' of Black-Scholes.
+
+\subsection{Asset-or-nothing}
+
+Pays $S(T)$ if $S(T)>K$:
+\[
+  \mathrm{AoN\_Call} = S_0\,e^{-qT}\,\Phi(d_1).
+\]
+This is the ``asset term'' of Black-Scholes; equivalently, it equals the
+derivative of the call with respect to $K$ (up to sign), giving the
+connection $\partial C/\partial K = -e^{-rT}\Phi(d_2)$ (call spread / cash
+digital).
+
+Code: \coderef{DigitalBlackScholes.cs}, \texttt{CashOrNothing()},
+\texttt{AssetOrNothing()}.
+
+%%==========================================================================
+\section{Geometric Asian Options}
+\label{sec:asian}
+%%==========================================================================
+
+\subsection{Model}
+
+Monitoring at $n$ equally-spaced dates $t_i=iT/n$, $i=1,\ldots,n$.
+Under $\Q$, $\ln S(t_i)$ is Gaussian:
+\[
+  \ln S(t_i) = \ln S(0) + \bigl(r-q-\tfrac{1}{2}\sigma^2\bigr)t_i
+               + \sigma\,W(t_i).
+\]
+
+\subsection{Moments of the geometric average}
+
+The discrete geometric average is:
+\[
+  G = \exp\!\Bigl(\tfrac{1}{n}\textstyle\sum_{i=1}^n \ln S(t_i)\Bigr).
+\]
+Since $\ln S(t_i)$ are jointly Gaussian, $\ln G$ is also Gaussian.
+
+\textbf{Mean:}
+\[
+  \E[\ln G] = \ln S(0) + \bigl(r-q-\tfrac{1}{2}\sigma^2\bigr)\frac{T}{n}
+              \cdot\frac{n(n+1)/2}{n}
+  = \ln S(0) + \bigl(r-q-\tfrac{1}{2}\sigma^2\bigr)T\,\frac{n+1}{2n}.
+\]
+
+\textbf{Variance:}
+\begin{align*}
+  \mathrm{Var}[\ln G]
+  &= \frac{\sigma^2}{n^2}\sum_{i=1}^n\sum_{j=1}^n \mathrm{Cov}\bigl(W(t_i),W(t_j)\bigr)\\
+  &= \frac{\sigma^2}{n^2}\sum_{i,j}\min(t_i,t_j)
+   = \frac{\sigma^2}{n^2}\cdot\frac{T}{n}\cdot\frac{n(n+1)(2n+1)}{6}\\
+  &= \sigma^2 T\,\frac{(n+1)(2n+1)}{6n^2}.
+\end{align*}
+(using $\sum_{i=1}^n\sum_{j=1}^n\min(i,j)=n(n+1)(2n+1)/6$).
+
+\subsection{Reduction to Black formula}
+
+Since $G$ is lognormal, the Asian price is exactly the Black formula on a
+``synthetic'' forward $F_G$ with effective vol $\sigma_{\rm eff}$:
+\[
+  F_G = S(0)\exp\!\Bigl(\E[\ln G]-\ln S(0)+\tfrac{1}{2}\mathrm{Var}[\ln G]\Bigr),
+  \quad \sigma_{\rm eff}=\sqrt{\mathrm{Var}[\ln G]/T}.
+\]
+\[
+  \mathrm{Asian\_Call} = e^{-rT}\,\mathrm{BlackFwd}(F_G,K,T,\sigma_{\rm eff}).
+\]
+
+Code: \coderef{GeometricAsian.cs}, \texttt{Price()}.  The arithmetic-average
+Asian (no closed form) is computed by Monte Carlo in
+\coderef{EQAsianOptionMCPricer.cs} and \coderef{FXAsianOptionMCPricer.cs}.
+
+%%==========================================================================
+\section{Zero Curves and Forward Rates}
+\label{sec:curves}
+%%==========================================================================
+
+\subsection{Discount factor and zero rate}
+
+A zero-coupon bond with maturity $T$ is priced:
+\[
+  P(0,T) = e^{-r(T)\cdot T},
+\]
+where $r(T)$ is the continuously-compounded zero rate.  The function
+\texttt{ZeroCurve.InterpolateRate} performs linear interpolation in the
+zero-rate space over the \texttt{Pillars} term structure.
+
+Code: \coderef{ZeroCurve.cs}, \texttt{InterpolateRate()}, \texttt{DiscountFactor()}.
+
+\subsection{Instantaneous forward rate}
+
+The instantaneous (continuously-compounded) forward rate between $t_0$ and $t_1$:
+\[
+  f(t_0,t_1) = \frac{r(t_1)\cdot t_1 - r(t_0)\cdot t_0}{t_1-t_0}.
+\]
+This ensures: $e^{-r(t_0)t_0}\cdot e^{-f(t_0,t_1)(t_1-t_0)}=e^{-r(t_1)t_1}$,
+i.e.\ the forward discount is consistent with the zero curve.
+
+Code: \coderef{ZeroCurve.cs}, \texttt{ForwardRate()}.  Used in
+\coderef{GbmOptionMCPricer.cs} to compute the per-step drift from the full
+curve:
+\[
+  \mu_i\cdot\Delta t = \bigl[f_d(t_i,t_{i+1})-f_c(t_i,t_{i+1})-\tfrac{1}{2}\sigma^2\bigr]\Delta t.
+\]
+
+%%==========================================================================
+\section{Discrete Dividends: the Escrowed Jump Model}
+\label{sec:dividends}
+%%==========================================================================
+
+\subsection{Model}
+
+A cash dividend $D_i$ is paid on ex-date $\tau_i\in(0,T]$.  The equity spot
+drops by the dividend amount at $\tau_i$ (the \emph{jump} or \emph{escrowed}
+model):
+\[
+  S(\tau_i^+) = S(\tau_i^-) - D_i.
+\]
+Combined with the continuous GBM drift:
+\[
+  S(t_{k+1}) = S(t_k)\exp\!\bigl[\mu_k\Delta t + \sigma\sqrt{\Delta t}\,Z_k\bigr]
+               - D_k,
+\]
+where $D_k = \sum_{\tau_i\in(t_k,t_{k+1}]}D_i$ is the sum of all dividends
+ex-dating during step $k$.
+
+\subsection{Validation}
+
+The model requires $\sum_{i:\tau_i\le T}D_i < S(0)$ (otherwise the forward
+becomes negative in the deterministic limit).  Code:
+\coderef{GbmOptionMCPricer.cs}, \texttt{PrepareDividends()}.
+
+%%==========================================================================
+\section{The SABR Stochastic Volatility Model}
+\label{sec:sabr}
+%%==========================================================================
+
+\subsection{Model dynamics (T-forward measure)}
+
+Hagan, Kumar, Lesniewski, Woodward (2002).  Under the T-forward measure $\QT$:
+\begin{align}
+  \dd F &= \sigma\,C(F)\,\dd W_1^T, \label{eq:sabr_F}\\
+  \dd\sigma &= \nu\,\sigma\,\dd W_2^T, \label{eq:sabr_sigma}\\
+  \dd W_1^T\,\dd W_2^T &= \rho\,\dd t. \label{eq:sabr_corr}
+\end{align}
+
+The CEV function $C(F)$ controls the backbone:
+\begin{itemize}[nosep]
+  \item $\beta=0$: $C(F)=1$ (normal/additive diffusion, forward can be negative)
+  \item $\beta=1$: $C(F)=F$ (lognormal/multiplicative diffusion)
+  \item $0<\beta<1$: $C(F)=F^\beta$ (CEV, absorbing boundary at $F=0$)
+\end{itemize}
+
+Initial conditions: $F(0)=F_0=S_0\exp\bigl[(r_d-r_f)T\bigr]$, $\sigma(0)=\alpha$.
+The option price is:
+\[
+  V = P(0,T)\,\E^T[\max(\phi(F(T)-K),0)],\quad\phi=\pm 1.
+\]
+
+Code: \coderef{FXSABRMCPricer.cs} (abstract base); all parameters in
+\coderef{SabrParameters} (protobuf).
+
+\subsection{Why the forward is a martingale under $\QT$}
+
+Since $C(F)\geq 0$ and the SDE \eqref{eq:sabr_F} has no drift term, $F$ is a
+local $\QT$-martingale by construction (the T-forward measure was chosen
+precisely for this purpose; see Section~\ref{sec:fx_forward}).
+
+\subsection{Euler--Maruyama and log-Euler discretization}
+
+\subsubsection{Volatility process (log-Euler, exact)}
+
+Since $\sigma$ follows lognormal dynamics $\dd\sigma=\nu\sigma\,\dd W_2^T$,
+the exact solution over $[t,t+\Delta t]$ is:
+\[
+  \sigma(t+\Delta t)=\sigma(t)\exp\!\bigl[\nu\sqrt{\Delta t}\,\tilde W_2
+                                          -\tfrac{1}{2}\nu^2\Delta t\bigr],
+\]
+where $\tilde W_2$ is a standard normal.  Log-Euler for $\sigma$ is exact
+because the SDE is linear-multiplicative in $\sigma$ with no $F$-dependence.
+
+Code: \coderef{FXSABRMCPricer.cs}, \texttt{SimulateSabrPath()}.
+
+\subsubsection{Brownian decomposition}
+
+Two independent factors $Z_1,Z_2\sim\N(0,1)$ from the simulation cube are
+combined to reproduce the correlation $\rho$:
+\[
+  \tilde W_1 = Z_1,\qquad \tilde W_2 = \rho Z_1 + \sqrt{1-\rho^2}\,Z_2.
+\]
+This factorization keeps $\rho$ as a pure model parameter; bumping $\rho$
+never requires regenerating the cube.
+
+Code: \coderef{FXSABRMCPricer.cs}, field \texttt{\_rhoComplement}$=\sqrt{1-\rho^2}$.
+
+\subsubsection{Forward process}
+
+\textbf{$\beta=1$ (lognormal, log-Euler, exact for frozen $\sigma$):}
+\[
+  F(t+\Delta t) = F(t)\exp\!\bigl[-\tfrac{1}{2}\sigma^2\Delta t
+                                   +\sigma\sqrt{\Delta t}\,Z_1\bigr].
+\]
+No discretization error for constant $\sigma$; cross-variation error with
+$\sigma$ is $O(\Delta t)$.
+
+\textbf{$\beta=0$ (normal, Euler-Maruyama, exact for constant $\sigma$):}
+\[
+  F(t+\Delta t) = F(t) + \sigma\sqrt{\Delta t}\,Z_1.
+\]
+
+\textbf{$0<\beta<1$ (CEV, Euler with absorbing boundary):}
+\[
+  F(t+\Delta t) = \max\!\bigl(F(t)+\sigma\max(F(t),0)^\beta\sqrt{\Delta t}\,Z_1,\;0\bigr).
+\]
+
+Code: \coderef{FXSABRMCPricer.cs}, method \texttt{StepForward()}.
+
+%%==========================================================================
+\section{Hagan SABR Implied Volatility Approximations}
+\label{sec:hagan}
+%%==========================================================================
+
+\subsection{Lognormal (Black) implied volatility ($\beta$ general)}
+
+Hagan et al.\ (2002) derived an asymptotic expansion for the lognormal (Black)
+implied vol $\sigma_B(F,K)$ accurate to $O(T)$.  Define:
+\[
+  x = \ln(F/K),\quad
+  \zeta = \frac{\nu}{\alpha}(FK)^{(1-\beta)/2}x,\quad
+  \chi(\zeta) = \ln\!\left(\frac{\sqrt{1-2\rho\zeta+\zeta^2}+\zeta-\rho}{1-\rho}\right).
+\]
+The implied Black vol is:
+\[
+  \sigma_B(F,K) = \frac{\alpha}{(FK)^{(1-\beta)/2}\,D(x)}
+  \cdot\frac{\zeta}{\chi(\zeta)}\cdot\bigl[1+\mathcal{C}\cdot T\bigr],
+\]
+where
+\[
+  D(x) = 1+\frac{(1-\beta)^2}{24}x^2+\frac{(1-\beta)^4}{1920}x^4,
+\]
+\[
+  \mathcal{C} = \frac{(1-\beta)^2\alpha^2}{24(FK)^{1-\beta}}
+              + \frac{\rho\beta\nu\alpha}{4(FK)^{(1-\beta)/2}}
+              + \frac{(2-3\rho^2)\nu^2}{24}.
+\]
+Limiting cases:
+\begin{itemize}[nosep]
+  \item $\nu\to 0$: $\zeta\to 0$, $\zeta/\chi\to 1$; reduces to CEV vol $\alpha/(FK)^{(1-\beta)/2}$.
+  \item $F\to K$ (ATM): $x\to 0$, $D\to 1$; no $0/0$ if handled by L'H\^{o}pital.
+  \item $\beta=1$, ATM: $\sigma_B\to\alpha(1+\mathcal{C}T)$ with $\mathcal{C}=(\rho\nu\alpha/4+(2-3\rho^2)\nu^2/24)$.
+\end{itemize}
+
+Code: \coderef{Hagan.cs}, \texttt{BlackVol()}.
+
+\subsection{Normal implied volatility ($\beta=0$, ATM)}
+
+The Hagan ATM normal-vol formula:
+\[
+  \sigma_N(F,F) = \alpha\Bigl(1+\frac{(2-3\rho^2)\nu^2}{24}\,T\Bigr).
+\]
+Combined with the Bachelier formula (Section~\ref{sec:bachelier}), this
+benchmarks the normal-SABR ($\beta=0$) MC prices.
+
+Code: \coderef{Hagan.cs}, \texttt{NormalVolAtm()}.
+
+%%==========================================================================
+\section{Barrier Options}
+\label{sec:barrier}
+%%==========================================================================
+
+\subsection{Definitions}
+
+A single-barrier option pays a vanilla payoff $\max(\phi(S(T)-K),0)$ only
+if the barrier $H$ is (or is not) crossed by the process during $[0,T]$:
+\begin{center}
+\begin{tabular}{lll}\toprule
+Type & Activated by & If not activated\\\midrule
+Up-and-In   & $S(t)\geq H$ for some $t$ & rebate\\
+Up-and-Out  & $S(t)< H$ for all $t$ & rebate\\
+Down-and-In & $S(t)\leq H$ for some $t$ & rebate\\
+Down-and-Out& $S(t)>H$ for all $t$  & rebate\\\bottomrule
+\end{tabular}
+\end{center}
+
+The model-free identity for zero rebate:
+\[
+  V_{\rm KI} + V_{\rm KO} = V_{\rm vanilla},
+\]
+holds path-by-path, providing an exact numerical sanity check (tested in
+\coderef{FXBarrierOptionMCPricerTests.cs} and
+\coderef{FXSABRBarrierOptionMCPricerTests.cs}).
+
+\subsection{Discrete monitoring}
+
+The barrier is checked at each MC time step $t_k$.  Code:
+\coderef{FXBarrierOptionMCPricer.cs}, \texttt{CheckDiscreteBarrier()};
+\coderef{FXSABRBarrierOptionMCPricer.cs}, \texttt{CheckDiscreteBarrier()}.
+
+\subsection{Continuous monitoring: Brownian bridge correction}
+
+With discrete time steps the MC pricer may miss barrier crossings occurring
+between observation dates.  The Brownian bridge correction (Baldi,
+Caramellino, Iovino 1999) estimates the conditional probability that a
+continuous GBM path crosses $H$ in $[t_k,t_{k+1}]$, given the endpoints
+$a=S(t_k)$ and $b=S(t_{k+1})$ on the \emph{same side} of $H$:
+
+\[
+  \boxed{P(\text{cross}\mid a,b,H)
+  = \exp\!\left(\frac{-2\ln(H/a)\,\ln(H/b)}{\sigma^2\Delta t}\right).}
+\]
+
+\subsubsection{Derivation}
+
+Under the T-forward measure, the log-process $X(t)=\ln F(t)$ is a Brownian
+motion with diffusion $\sigma$ (for $\beta=1$).  Conditioned on
+$X(t_k)=\ln a$ and $X(t_{k+1})=\ln b$, the bridge $\{X(s):t_k\le s\le t_{k+1}\}$
+is a Brownian bridge with variance $\sigma^2(s-t_k)(t_{k+1}-s)/(t_{k+1}-t_k)$.
+
+The maximum of a Brownian bridge $B^{\rm br}$ on $[0,1]$ with $B^{\rm br}(0)=u$,
+$B^{\rm br}(1)=v$ satisfies:
+\[
+  P\!\left(\sup_{s\in[0,1]}B^{\rm br}(s)\geq h\right)
+  = \exp\!\bigl(-2h(h-u-v)\bigr)\mathbf{1}_{h>\max(u,v)}.
+\]
+Translating to the log barrier $h=\ln H$, $u=\ln a$, $v=\ln b$ and
+rescaling by total variance $\sigma^2\Delta t$:
+\[
+  P = \exp\!\left(-2\cdot\frac{(\ln H-\ln a)(\ln H-\ln b)}{\sigma^2\Delta t}\right)
+    = \exp\!\left(\frac{-2\ln(H/a)\ln(H/b)}{\sigma^2\Delta t}\right).
+\]
+When $\ln(H/a)$ and $\ln(H/b)$ have opposite signs (endpoints on opposite
+sides), $P=1$ (certain crossing).
+
+Code references:
+\begin{itemize}[nosep]
+  \item \coderef{FXBarrierOptionMCPricer.cs}: \texttt{BridgeCrossingProb()},
+    \texttt{CheckContinuousBarrier()} with $\sigma^2\Delta t=\texttt{SigSqDt}$ (constant vol).
+  \item \coderef{FXSABRBarrierOptionMCPricer.cs}: same formula, with
+    $\sigma^2\Delta t$ replaced by the stochastic \emph{beginning-of-step} SABR vol:
+    \[ \sigma^2\Delta t \;\longrightarrow\; v_{\rm beg}(t)^2\,\Delta t, \]
+    where $v_{\rm beg}(0)=\alpha$ and $v_{\rm beg}(t_k)=\texttt{volPath}[k-1]$.
+    This is exact for $\beta=1$ (locally lognormal) and an approximation for other $\beta$.
+\end{itemize}
+
+\subsubsection{Reproducibility}
+
+Bridge draws use a deterministic seed per (path, step):
+\begin{lstlisting}
+var pathSeed = CurrentPathIndex ^ unchecked((int)0x9E3779B9u);
+var u = new Random(pathSeed ^ (t * 1000003)).NextDouble();
+if (u < pCross) return true;
+\end{lstlisting}
+The salt \texttt{0x9E3779B9} (the fractional part of the golden ratio in
+32-bit hex) distributes the seed space.
+
+\subsection{SABR barrier: barrier on the forward}
+
+FX barrier options are quoted on the spot $S$.  The SABR MC pricer simulates
+the forward $F(t,T)$ (not $S$), so the barrier is expressed in forward
+space.  Under the T-forward measure with flat rates:
+\[
+  F(t,T) = S(t)\,e^{(r_d-r_f)(T-t)}.
+\]
+The barrier on $F$ coincides with the barrier on $S$ if and only if $r_d=r_f$
+(then $F(t,T)=S(t)$ for all $t$).  This is used in the degeneracy test
+\texttt{ZeroVolOfVol\_EqualRates\_SabrBarrier\_MatchesGbmBarrier} in
+\coderef{FXSABRBarrierOptionMCPricerTests.cs}.
+
+Code: \coderef{FXSABRBarrierOptionMCPricer.cs}, \texttt{EvaluatePayoff()}.
+
+%%==========================================================================
+\section{Monte Carlo Pricing}
+\label{sec:mc}
+%%==========================================================================
+
+\subsection{Estimator}
+
+Given $M$ independent paths, the Monte Carlo price estimator is:
+\[
+  \hat V = \frac{1}{M}\sum_{m=1}^M \mathrm{Payoff}_m,
+  \qquad \mathrm{Var}[\hat V] = \frac{s^2}{M},
+  \quad s^2=\frac{1}{M-1}\sum_m(\mathrm{Payoff}_m-\hat V)^2.
+\]
+A 95\% confidence interval is $\hat V\pm 1.96\,s/\sqrt{M}$.
+
+Code: \coderef{MCBasePricer.cs}, \texttt{Price()};
+\coderef{PricingResult} carries \texttt{Price}, \texttt{StandardError},
+\texttt{ConfidenceIntervalLower/Upper}.
+
+\subsection{Parallel path evaluation}
+
+\coderef{MCBasePricer.Price()} uses \texttt{Parallel.For} to distribute
+paths across CPU cores with thread-local accumulators (sum, sum-of-squares),
+merged at the end.  Thread safety is achieved via:
+\begin{itemize}[nosep]
+  \item ThreadLocal spot/forward buffers in \coderef{GbmOptionMCPricer.cs}
+    and \coderef{FXSABRMCPricer.cs}.
+  \item The \texttt{SimulationCube} is read-only after construction.
+\end{itemize}
+
+\subsection{Simulation cube: pre-generated standard normals}
+
+The \texttt{SimulationCube} (shape $M\times\text{Steps}\times\text{Assets}$)
+pre-generates all required $\N(0,1)$ draws.  For SABR, two assets are
+required (one for the forward, one for the independent vol factor).  For
+single-asset GBM, one asset suffices.
+
+Code: \coderef{SimulationCube.cs}.
+
+\subsection{Common random numbers (variance reduction)}
+
+Bumped pricers for Greeks reuse the same \texttt{SimulationCube}
+(\texttt{CreateBumped} returns a new pricer instance pointing to the same
+cube).  The base price and the bumped price share path realizations, reducing
+the variance of the finite-difference estimator by positive path-level
+correlation.
+
+Code: \coderef{FXSABRVanillaOptionMCPricer.cs} and
+\coderef{FXSABRBarrierOptionMCPricer.cs}, method \texttt{CreateBumped()}.
+
+%%==========================================================================
+\section{Greeks}
+\label{sec:greeks}
+%%==========================================================================
+
+\subsection{Bump-and-reprice}
+
+All Greeks are computed by finite-difference bump-and-reprice:
+\[
+  \Delta = \frac{V(S+\varepsilon)-V(S-\varepsilon)}{2\varepsilon},
+  \quad
+  \Gamma = \frac{V(S+\varepsilon)-2V(S)+V(S-\varepsilon)}{\varepsilon^2},
+  \quad
+  \mathcal{V} = \frac{V(\sigma+\varepsilon)-V(\sigma-\varepsilon)}{2\varepsilon}.
+\]
+For spot/rate bumps the same pricer instance is re-priced with bumped market
+data (\coderef{MarketDataBumps.cs}).  For vol bumps, a new pricer instance
+is constructed with bumped $\sigma$ or $\alpha$, reusing the same cube.
+
+\subsection{SABR-specific Greeks}
+
+\textbf{Vega ($\partial V/\partial\alpha$):} bump $\alpha\to\alpha\pm\varepsilon$,
+construct new pricer, reprice on same market.  $\alpha$ is the SABR initial
+vol level, playing the role of ATM vol.
+
+\textbf{Vol-of-vol sensitivity ($\partial V/\partial\nu$):} bump $\nu$,
+construct new pricer.  Code: \coderef{FXSABRMCPricer.cs},
+\texttt{ComputeVolOfVolSensitivity()}.
+
+\textbf{Correlation sensitivity ($\partial V/\partial\rho$):} bump $\rho$
+(clamped to $(-1,1)$), construct new pricer.  Code:
+\coderef{FXSABRMCPricer.cs}, \texttt{ComputeCorrelSensitivity()}.
+
+\textbf{Theta:} not computed (returned as \texttt{NaN}) because bumping time
+would require rebuilding the cube or re-parameterising the contract.
+
+%%==========================================================================
+\section{Basket Options}
+\label{sec:basket}
+%%==========================================================================
+
+\subsection{Model}
+
+An $n$-leg basket with weights $w_i$ and a weighted-sum aggregation:
+\[
+  B(t) = \sum_{i=1}^n w_i\,S_i(t).
+\]
+Each leg $S_i$ follows correlated GBM under $\Q$:
+\[
+  \frac{\dd S_i}{S_i} = \mu_i\,\dd t + \sigma_i\,\dd W_i,
+  \qquad \dd W_i\,\dd W_j = \rho_{ij}\,\dd t.
+\]
+The simulation uses a Cholesky decomposition of the correlation matrix to
+generate correlated standard normals from independent draws.
+
+Code: \coderef{FXBasketVanillaMCPricer.cs},
+\coderef{FXBasketBarrierOptionMCPricer.cs}.
+
+\subsection{Effective vol for basket barrier bridge}
+
+For continuous barrier monitoring on a basket, the effective basket
+volatility $\sigma_{\rm eff}$ at each step is reconstructed from the realized
+leg spots and the leg vols, used as the local diffusion coefficient in the
+Brownian bridge formula (Section~\ref{sec:barrier}).
+
+%%==========================================================================
+\section{Normal Distribution Utilities}
+\label{sec:normal}
+%%==========================================================================
+
+The standard normal CDF is evaluated using the complementary error function:
+\[
+  \Phi(x) = \tfrac{1}{2}\,\mathrm{erfc}\!\bigl(-x/\sqrt{2}\bigr),
+\]
+via \texttt{MathNet.Numerics.SpecialFunctions.Erfc}, giving full
+double-precision accuracy (no polynomial approximation error).
+
+The PDF:
+\[
+  \phi(x) = \frac{1}{\sqrt{2\pi}}\,e^{-x^2/2}.
+\]
+
+Code: \coderef{NormalDistribution.cs}, \texttt{Cdf()}, \texttt{Pdf()}.
+
+%%==========================================================================
+\section{Summary of Code-to-Formula Mapping}
+\label{sec:summary}
+%%==========================================================================
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{lll}\toprule
+\textbf{File} & \textbf{Model / Formula} & \textbf{Section}\\\midrule
+\texttt{GarmanKohlhagen.cs}           & GK call/put                       & \ref{sec:gk}\\
+\texttt{BlackScholes.cs}              & BSM call/put                      & \ref{sec:bsm}\\
+\texttt{BlackForward.cs}              & Black forward call/put            & \ref{sec:black_fwd}\\
+\texttt{Bachelier.cs}                 & Normal model call/put             & \ref{sec:bachelier}\\
+\texttt{DigitalBlackScholes.cs}       & Cash/asset-or-nothing             & \ref{sec:digital}\\
+\texttt{GeometricAsian.cs}            & Kemna-Vorst geometric Asian       & \ref{sec:asian}\\
+\texttt{Hagan.cs}                     & SABR $\sigma_B$, $\sigma_N$       & \ref{sec:hagan}\\
+\texttt{NormalDistribution.cs}        & $\Phi$, $\phi$ via erfc           & \ref{sec:normal}\\
+\texttt{ZeroCurve.cs}                 & Interpolation, $P(0,T)$, $f(t_0,t_1)$ & \ref{sec:curves}\\
+\texttt{GbmOptionMCPricer.cs}         & GBM log-Euler, discrete dividends & \ref{sec:gbm},\ref{sec:dividends}\\
+\texttt{FXSABRMCPricer.cs}            & SABR under $\QT$, Euler-Maruyama  & \ref{sec:sabr}\\
+\texttt{FXBarrierOptionMCPricer.cs}   & Barrier, Brownian bridge (GBM)    & \ref{sec:barrier}\\
+\texttt{FXSABRBarrierOptionMCPricer.cs}&Barrier, Brownian bridge (SABR)   & \ref{sec:barrier}\\
+\texttt{FXBasketVanillaMCPricer.cs}   & Correlated GBM basket             & \ref{sec:basket}\\
+\texttt{FXBasketBarrierOptionMCPricer.cs}&Basket barrier + bridge         & \ref{sec:basket},\ref{sec:barrier}\\
+\texttt{MCBasePricer.cs}              & MC estimator, confidence interval & \ref{sec:mc}\\\bottomrule
+\end{tabular}
+\end{center}
+
+%%==========================================================================
+\section*{References}
+%%==========================================================================
+\addcontentsline{toc}{section}{References}
+
+\begin{enumerate}[label={[\arabic*]}]
+  \item Garman, M.\ and Kohlhagen, S.\ (1983).  ``Foreign currency option values.''
+        \textit{Journal of International Money and Finance} 2(3): 231--237.
+  \item Black, F.\ and Scholes, M.\ (1973).  ``The pricing of options and corporate liabilities.''
+        \textit{Journal of Political Economy} 81(3): 637--654.
+  \item Black, F.\ (1976).  ``The pricing of commodity contracts.''
+        \textit{Journal of Financial Economics} 3(1--2): 167--179.
+  \item Bachelier, L.\ (1900).  ``Th\'eorie de la sp\'eculation.''
+        \textit{Annales Scientifiques de l'\'Ecole Normale Sup\'erieure} 17: 21--86.
+  \item Hagan, P., Kumar, D., Lesniewski, A., Woodward, D.\ (2002).
+        ``Managing smile risk.''
+        \textit{Wilmott Magazine}: 84--108.
+  \item Baldi, P., Caramellino, L., Iovino, M.G.\ (1999).
+        ``Pricing general barrier options: A numerical approach using sharp large deviations.''
+        \textit{Mathematical Finance} 9(4): 293--321.
+  \item Kemna, A.\ and Vorst, A.\ (1990).
+        ``A pricing method for options based on average asset values.''
+        \textit{Journal of Banking and Finance} 14(1): 113--129.
+  \item Merton, R.C.\ (1973).  ``Theory of rational option pricing.''
+        \textit{Bell Journal of Economics and Management Science} 4(1): 141--183.
+  \item Brigo, D.\ and Mercurio, F.\ (2006).
+        \textit{Interest Rate Models -- Theory and Practice}, 2nd ed.\ Springer.
+\end{enumerate}
+
+\end{document}

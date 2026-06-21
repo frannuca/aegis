@@ -9,5 +9,6 @@
     &lt;TestId&gt;xUnit::0461ADDB-6794-42D7-A3EA-F82EFF106DC8::net10.0::MCPricer.Tests.FXSABRVanillaOptionMCPricerTests.ZeroVolOfVol_Beta1_AtmCall_MatchesGarmanKohlhagen&lt;/TestId&gt;
     &lt;TestId&gt;xUnit::0461ADDB-6794-42D7-A3EA-F82EFF106DC8::net10.0::MCPricer.Tests.EQAsianOptionMCPricerTests&lt;/TestId&gt;
     &lt;TestId&gt;xUnit::0461ADDB-6794-42D7-A3EA-F82EFF106DC8::net10.0::MCPricer.Tests.FXBasketBarrierOptionContinuousPerformanceTests&lt;/TestId&gt;
+    &lt;TestId&gt;xUnit::0461ADDB-6794-42D7-A3EA-F82EFF106DC8::net10.0::MCPricer.Tests.FXBarrierOptionContinuousPerformanceTests.ContinuousUpAndOut_250DailyObservations_CompletesWithinBudget&lt;/TestId&gt;
   &lt;/TestAncestor&gt;
 &lt;/SessionState&gt;</s:String></wpf:ResourceDictionary>

@@ -2,6 +2,7 @@ using Aegis.Instruments;
 using AnalyticalPricers;
 using MCPricer.Equity;
 using RandomSimulator;
+using NodaTime;
 
 namespace MCPricer.Tests;
 
@@ -31,8 +32,8 @@ public sealed class EQDigitalOptionMCPricerTests
     private const int Steps       = 1;       // single step suffices for European payoffs
     private const int DefaultSeed = 42;
 
-    private static readonly DateOnly ValuationDate = new(2026, 1, 1);
-    private static readonly DateOnly CurveMaturity = new(2036, 1, 1);
+    private static readonly LocalDate ValuationDate = new(2026, 1, 1);
+    private static readonly LocalDate CurveMaturity = new(2036, 1, 1);
 
     // ── Cash-or-nothing ────────────────────────────────────────────────────────
 
@@ -86,8 +87,9 @@ public sealed class EQDigitalOptionMCPricerTests
     public void CashOrNothing_CallPlusPut_EqualsDiscountedPayout()
     {
         var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mcCall = BuildPricer(S0, K, T, Sigma, R, Q, DigitalSettlementType.CashOrNothing, true,  cube).Price();
-        var mcPut  = BuildPricer(S0, K, T, Sigma, R, Q, DigitalSettlementType.CashOrNothing, false, cube).Price();
+        var market = MakeMarket(S0, R, Q);
+        var mcCall = BuildPricer(S0, K, T, Sigma, R, Q, DigitalSettlementType.CashOrNothing, true,  cube).Price(market);
+        var mcPut  = BuildPricer(S0, K, T, Sigma, R, Q, DigitalSettlementType.CashOrNothing, false, cube).Price(market);
 
         var mcSum         = mcCall.Price + mcPut.Price;
         var analyticalSum = Math.Exp(-R * T) * Payout;
@@ -102,8 +104,9 @@ public sealed class EQDigitalOptionMCPricerTests
     {
         // Call + Put = S·e^{-q·T}
         var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mcCall = BuildPricer(S0, K, T, Sigma, R, Q, DigitalSettlementType.AssetOrNothing, true,  cube).Price();
-        var mcPut  = BuildPricer(S0, K, T, Sigma, R, Q, DigitalSettlementType.AssetOrNothing, false, cube).Price();
+        var market = MakeMarket(S0, R, Q);
+        var mcCall = BuildPricer(S0, K, T, Sigma, R, Q, DigitalSettlementType.AssetOrNothing, true,  cube).Price(market);
+        var mcPut  = BuildPricer(S0, K, T, Sigma, R, Q, DigitalSettlementType.AssetOrNothing, false, cube).Price(market);
 
         var mcSum         = mcCall.Price + mcPut.Price;
         var analyticalSum = S0 * Math.Exp(-Q * T);
@@ -122,8 +125,9 @@ public sealed class EQDigitalOptionMCPricerTests
         const double itmStrike = 90.0;
         var expected = Math.Exp(-R * T) * Payout;
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildPricer(S0, itmStrike, T, sigma: 0.0, R, Q, DigitalSettlementType.CashOrNothing, isCall: true, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, R, Q);
+        var mc     = BuildPricer(S0, itmStrike, T, sigma: 0.0, R, Q, DigitalSettlementType.CashOrNothing, isCall: true, cube).Price(market);
 
         Assert.Equal(expected, mc.Price, precision: 10);
     }
@@ -133,8 +137,9 @@ public sealed class EQDigitalOptionMCPricerTests
     {
         // σ = 0: forward F ≈ 103.05 < K = 120 (deep OTM) ⇒ never pays.
         const double otmStrike = 120.0;
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildPricer(S0, otmStrike, T, sigma: 0.0, R, Q, DigitalSettlementType.CashOrNothing, isCall: true, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, R, Q);
+        var mc     = BuildPricer(S0, otmStrike, T, sigma: 0.0, R, Q, DigitalSettlementType.CashOrNothing, isCall: true, cube).Price(market);
 
         Assert.Equal(0.0, mc.Price, precision: 10);
     }
@@ -149,8 +154,9 @@ public sealed class EQDigitalOptionMCPricerTests
         var forward  = S0 * Math.Exp((R - Q) * T);
         var expected = Math.Exp(-R * T) * forward;
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildPricer(S0, itmStrike, T, sigma: 0.0, R, Q, DigitalSettlementType.AssetOrNothing, isCall: true, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, R, Q);
+        var mc     = BuildPricer(S0, itmStrike, T, sigma: 0.0, R, Q, DigitalSettlementType.AssetOrNothing, isCall: true, cube).Price(market);
 
         // precision: 8, not 10 — every path returns the *same* deterministic payoff
         // (~98), and summing ~10⁵ copies of a value of that magnitude accumulates
@@ -174,9 +180,8 @@ public sealed class EQDigitalOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Vanilla       = new VanillaOption()
         };
-        var market = MakeMarket(S0, R, Q);
         Assert.Throws<ArgumentException>(() =>
-            new EQDigitalOptionMCPricer(vanillaOpt, ValuationDate, market, Sigma, cube));
+            new EQDigitalOptionMCPricer(vanillaOpt, ValuationDate, Sigma, cube));
     }
 
     [Fact]
@@ -192,9 +197,8 @@ public sealed class EQDigitalOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Digital       = new DigitalOption { Payout = Payout }
         };
-        var market = MakeMarket(S0, R, Q);
         Assert.Throws<ArgumentException>(() =>
-            new EQDigitalOptionMCPricer(option, ValuationDate, market, Sigma, cube));
+            new EQDigitalOptionMCPricer(option, ValuationDate, Sigma, cube));
     }
 
     [Fact]
@@ -210,9 +214,8 @@ public sealed class EQDigitalOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Digital       = new DigitalOption { Payout = 0.0, SettlementType = DigitalSettlementType.CashOrNothing }
         };
-        var market = MakeMarket(S0, R, Q);
         Assert.Throws<ArgumentException>(() =>
-            new EQDigitalOptionMCPricer(option, ValuationDate, market, Sigma, cube));
+            new EQDigitalOptionMCPricer(option, ValuationDate, Sigma, cube));
     }
 
     [Fact]
@@ -229,8 +232,9 @@ public sealed class EQDigitalOptionMCPricerTests
         double spot, double strike, double expiry, double sigma,
         double r, double q, DigitalSettlementType settlementType, bool isCall)
     {
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildPricer(spot, strike, expiry, sigma, r, q, settlementType, isCall, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(spot, r, q);
+        var mc     = BuildPricer(spot, strike, expiry, sigma, r, q, settlementType, isCall, cube).Price(market);
 
         var analytical = settlementType == DigitalSettlementType.AssetOrNothing
             ? DigitalBlackScholes.AssetOrNothing(spot, strike, expiry, sigma, r, q, isCall)
@@ -252,8 +256,7 @@ public sealed class EQDigitalOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Digital       = new DigitalOption { Payout = Payout, SettlementType = settlementType }
         };
-        var market = MakeMarket(spot, r, q);
-        return new EQDigitalOptionMCPricer(option, ValuationDate, market, sigma, cube);
+        return new EQDigitalOptionMCPricer(option, ValuationDate, sigma, cube);
     }
 
     private static EqMarketData MakeMarket(double spot, double r, double q) =>

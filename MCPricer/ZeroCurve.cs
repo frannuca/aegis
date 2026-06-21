@@ -1,5 +1,6 @@
-using System.Globalization;
 using Aegis.Instruments;
+using NodaTime;
+using NodaTime.Text;
 
 namespace MCPricer;
 
@@ -25,12 +26,14 @@ namespace MCPricer;
 /// </summary>
 public static class ZeroCurve
 {
+    private static readonly LocalDatePattern IsoPattern = LocalDatePattern.Iso;
+
     /// <summary>
     /// Interpolates the continuously-compounded zero rate r(T) implied by
     /// <paramref name="curve"/> at maturity <paramref name="maturityYears"/>,
     /// measured in year-fractions (Act/365) from <paramref name="valuationDate"/>.
     /// </summary>
-    public static double InterpolateRate(Pillars curve, DateOnly valuationDate, double maturityYears)
+    public static double InterpolateRate(Pillars curve, LocalDate valuationDate, double maturityYears)
     {
         ArgumentNullException.ThrowIfNull(curve);
         if (curve.Pillar.Count == 0)
@@ -44,13 +47,15 @@ public static class ZeroCurve
 
         for (var i = 0; i < n; i++)
         {
-            var pillar = curve.Pillar[i];
-            if (!DateOnly.TryParse(pillar.Date, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
+            var pillar      = curve.Pillar[i];
+            var parseResult = IsoPattern.Parse(pillar.Date);
+            if (!parseResult.Success)
                 throw new ArgumentException(
                     $"Pillar date '{pillar.Date}' is not a valid ISO-8601 date.", nameof(curve));
 
-            tenors[i] = (date.DayNumber - valuationDate.DayNumber) / 365.0;
-            rates[i]  = pillar.Value;
+            var date   = parseResult.Value;
+            tenors[i]  = Period.Between(valuationDate, date, PeriodUnits.Days).Days / 365.0;
+            rates[i]   = pillar.Value;
 
             if (i > 0 && tenors[i] <= tenors[i - 1])
                 throw new ArgumentException(
@@ -95,14 +100,44 @@ public static class ZeroCurve
     }
 
     /// <summary>
+    /// Returns the continuously-compounded instantaneous forward zero rate
+    /// f(t0, t1) implied by the curve between year-fractions t0 and t1:
+    ///   f(t0, t1) = (r(t1)·t1 − r(t0)·t0) / (t1 − t0)
+    ///
+    /// Exact shortcuts preserve bit-for-bit results with flat curves:
+    ///   t0 == 0     → f = r(t1)           (no t0 interpolation needed)
+    ///   r(t0)==r(t1) → f = r(t0)          (flat segment; avoids ULP drift)
+    ///   t0 == t1    → f = r(t1)           (degenerate interval)
+    /// </summary>
+    public static double ForwardRate(Pillars curve, LocalDate valuationDate, double t0, double t1)
+    {
+        if (t0 >= t1)
+            return InterpolateRate(curve, valuationDate, t1);
+        var r1 = InterpolateRate(curve, valuationDate, t1);
+        if (t0 == 0.0)
+            return r1;
+        var r0 = InterpolateRate(curve, valuationDate, t0);
+        if (r0 == r1)
+            return r0;
+        return (r1 * t1 - r0 * t0) / (t1 - t0);
+    }
+
+    /// <summary>
+    /// Discount factor P(0, T) = exp(−r(T)·T), where r(T) is the interpolated
+    /// zero rate from the curve at maturity T.
+    /// </summary>
+    public static double DiscountFactor(Pillars curve, LocalDate valuationDate, double maturityYears)
+        => Math.Exp(-InterpolateRate(curve, valuationDate, maturityYears) * maturityYears);
+
+    /// <summary>
     /// Builds a flat single-pillar curve r(τ) ≡ <paramref name="rate"/> for all
     /// maturities — convenient for constructing market data from a single quoted
     /// rate (the common case when no term structure is available).
     /// </summary>
-    public static Pillars Flat(double rate, DateOnly maturity)
+    public static Pillars Flat(double rate, LocalDate maturity)
     {
         var curve = new Pillars();
-        curve.Pillar.Add(new Pillar { Date = maturity.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), Value = rate });
+        curve.Pillar.Add(new Pillar { Date = maturity.ToString("yyyy-MM-dd", null), Value = rate });
         return curve;
     }
 }

@@ -2,6 +2,7 @@ using Aegis.Instruments;
 using AnalyticalPricers;
 using MCPricer.FX;
 using RandomSimulator;
+using NodaTime;
 
 namespace MCPricer.Tests;
 
@@ -42,8 +43,8 @@ public sealed class FXBasketVanillaMCPricerTests
     // at the option's expiry from this valuation date — see ZeroCurve.InterpolateRate.
     // Tests use single-pillar "flat" curves so the interpolated rate equals the scalar
     // reference rate (rd, rf) regardless of T, keeping the analytical comparisons exact.
-    private static readonly DateOnly ValuationDate = new(2026, 1, 1);
-    private static readonly DateOnly CurveMaturity = new(2036, 1, 1);
+    private static readonly LocalDate ValuationDate = new(2026, 1, 1);
+    private static readonly LocalDate CurveMaturity = new(2036, 1, 1);
 
     // ── Single-leg basket ⇒ exact Garman-Kohlhagen ───────────────────────────
 
@@ -67,8 +68,8 @@ public sealed class FXBasketVanillaMCPricerTests
         var vols = new Dictionary<string, double> { ["EURUSD"] = vol };
 
         var cube = SimulationCube.GenerateIndependent(Paths, Steps, assets: 1, Seed);
-        using var pricer = new FXBasketVanillaMCPricer(option, ValuationDate, markets, vols, cube);
-        var mc = pricer.Price();
+        using var pricer = new FXBasketVanillaMCPricer(option, ValuationDate, cube);
+        var mc = pricer.Price(markets, vols);
 
         var gk = GarmanKohlhagen.Price(spot, strike, T, vol, rd, rf, isCall: true);
 
@@ -86,8 +87,8 @@ public sealed class FXBasketVanillaMCPricerTests
         var vols    = new Dictionary<string, double> { ["EURUSD"] = vol };
 
         var cube = SimulationCube.GenerateIndependent(Paths, Steps, assets: 1, Seed);
-        using var pricer = new FXBasketVanillaMCPricer(option, ValuationDate, markets, vols, cube);
-        var mc = pricer.Price();
+        using var pricer = new FXBasketVanillaMCPricer(option, ValuationDate, cube);
+        var mc = pricer.Price(markets, vols);
         var gk = GarmanKohlhagen.Price(spot, strike, T, vol, rd, rf, isCall: false);
 
         AssertWithinMcBounds(mc, gk, sigma: 5.0);
@@ -107,8 +108,8 @@ public sealed class FXBasketVanillaMCPricerTests
             legs: [("EURUSD", w1), ("GBPUSD", w2)], BasketAggregationMethod.WeightedSum, strike, isCall: true);
 
         var cube = SimulationCube.GenerateIndependent(Paths, Steps, assets: 2, Seed);
-        using var pricer = new FXBasketVanillaMCPricer(option, ValuationDate, legs.markets, legs.vols, cube);
-        var mc = pricer.Price();
+        using var pricer = new FXBasketVanillaMCPricer(option, ValuationDate, cube);
+        var mc = pricer.Price(legs.markets, legs.vols);
 
         var level    = w1 * spot1T + w2 * spot2T;
         var expected = Math.Exp(-rd * T) * Math.Max(level - strike, 0.0);
@@ -127,8 +128,8 @@ public sealed class FXBasketVanillaMCPricerTests
             legs: [("EURUSD", w1), ("GBPUSD", w2)], BasketAggregationMethod.BestOf, strike, isCall: true);
 
         var cube = SimulationCube.GenerateIndependent(Paths, Steps, assets: 2, Seed);
-        using var pricer = new FXBasketVanillaMCPricer(option, ValuationDate, legs.markets, legs.vols, cube);
-        var mc = pricer.Price();
+        using var pricer = new FXBasketVanillaMCPricer(option, ValuationDate, cube);
+        var mc = pricer.Price(legs.markets, legs.vols);
 
         var level    = Math.Max(w1 * spot1T, w2 * spot2T);
         var expected = Math.Exp(-rd * T) * Math.Max(level - strike, 0.0);
@@ -146,8 +147,8 @@ public sealed class FXBasketVanillaMCPricerTests
             legs: [("EURUSD", w1), ("GBPUSD", w2)], BasketAggregationMethod.WorstOf, strike, isCall: true);
 
         var cube = SimulationCube.GenerateIndependent(Paths, Steps, assets: 2, Seed);
-        using var pricer = new FXBasketVanillaMCPricer(option, ValuationDate, legs.markets, legs.vols, cube);
-        var mc = pricer.Price();
+        using var pricer = new FXBasketVanillaMCPricer(option, ValuationDate, cube);
+        var mc = pricer.Price(legs.markets, legs.vols);
 
         var level    = Math.Min(w1 * spot1T, w2 * spot2T);
         var expected = Math.Exp(-rd * T) * Math.Max(level - strike, 0.0);
@@ -164,8 +165,8 @@ public sealed class FXBasketVanillaMCPricerTests
             strike: 100.0, isCall: true);
 
         var cube = SimulationCube.GenerateIndependent(Paths, Steps, assets: 2, Seed);
-        using var pricer = new FXBasketVanillaMCPricer(option, ValuationDate, legs.markets, legs.vols, cube);
-        var mc = pricer.Price();
+        using var pricer = new FXBasketVanillaMCPricer(option, ValuationDate, cube);
+        var mc = pricer.Price(legs.markets, legs.vols);
 
         Assert.Equal(0.0, mc.Price, precision: 10);
     }
@@ -194,15 +195,15 @@ public sealed class FXBasketVanillaMCPricerTests
 
         var worstOf = new FXBasketVanillaMCPricer(
             MakeBasketOption([("EURUSD", 0.5), ("GBPUSD", 0.5)], BasketAggregationMethod.WorstOf, strike, true),
-            ValuationDate, legs.markets, legs.vols, cube).Price();
+            ValuationDate, cube).Price(legs.markets, legs.vols);
 
         var bestOf = new FXBasketVanillaMCPricer(
             MakeBasketOption([("EURUSD", 0.5), ("GBPUSD", 0.5)], BasketAggregationMethod.BestOf, strike, true),
-            ValuationDate, legs.markets, legs.vols, cube).Price();
+            ValuationDate, cube).Price(legs.markets, legs.vols);
 
         var weightedSum = new FXBasketVanillaMCPricer(
             MakeBasketOption([("EURUSD", 0.5), ("GBPUSD", 0.5)], BasketAggregationMethod.WeightedSum, strike, true),
-            ValuationDate, legs.markets, legs.vols, cube).Price();
+            ValuationDate, cube).Price(legs.markets, legs.vols);
 
         Assert.True(worstOf.Price <= bestOf.Price + 1e-9,
             $"WorstOf={worstOf.Price:F6} should be ≤ BestOf={bestOf.Price:F6}");
@@ -230,10 +231,10 @@ public sealed class FXBasketVanillaMCPricerTests
 
         var call = new FXBasketVanillaMCPricer(
             MakeBasketOption([("EURUSD", w1), ("GBPUSD", w2)], BasketAggregationMethod.WeightedSum, strike, true),
-            ValuationDate, legs.markets, legs.vols, cube).Price();
+            ValuationDate, cube).Price(legs.markets, legs.vols);
         var put = new FXBasketVanillaMCPricer(
             MakeBasketOption([("EURUSD", w1), ("GBPUSD", w2)], BasketAggregationMethod.WeightedSum, strike, false),
-            ValuationDate, legs.markets, legs.vols, cube).Price();
+            ValuationDate, cube).Price(legs.markets, legs.vols);
 
         var f1 = 1.10 * Math.Exp((0.05 - 0.02) * T);
         var f2 = 1.25 * Math.Exp((0.05 - 0.01) * T);
@@ -270,10 +271,10 @@ public sealed class FXBasketVanillaMCPricerTests
 
         var lowCorr = new FXBasketVanillaMCPricer(
             MakeBasketOption([("EURUSD", 0.5), ("GBPUSD", 0.5)], BasketAggregationMethod.WeightedSum, atmStrike, true),
-            ValuationDate, legs.markets, legs.vols, lowCorrCube).Price();
+            ValuationDate, lowCorrCube).Price(legs.markets, legs.vols);
         var highCorr = new FXBasketVanillaMCPricer(
             MakeBasketOption([("EURUSD", 0.5), ("GBPUSD", 0.5)], BasketAggregationMethod.WeightedSum, atmStrike, true),
-            ValuationDate, legs.markets, legs.vols, highCorrCube).Price();
+            ValuationDate, highCorrCube).Price(legs.markets, legs.vols);
 
         Assert.True(highCorr.Price > lowCorr.Price,
             $"High-correlation basket call={highCorr.Price:F6} should exceed low-correlation={lowCorr.Price:F6}");
@@ -294,8 +295,7 @@ public sealed class FXBasketVanillaMCPricerTests
         };
         var cube = SimulationCube.GenerateIndependent(1_000, Steps, 1, Seed);
         Assert.Throws<ArgumentException>(() =>
-            new FXBasketVanillaMCPricer(option, ValuationDate,
-                new Dictionary<string, FxMarketData>(), new Dictionary<string, double>(), cube));
+            new FXBasketVanillaMCPricer(option, ValuationDate, cube));
     }
 
     [Fact]
@@ -304,8 +304,7 @@ public sealed class FXBasketVanillaMCPricerTests
         var option = MakeBasketOption(legs: [], BasketAggregationMethod.WeightedSum, strike: 1.0, isCall: true);
         var cube   = SimulationCube.GenerateIndependent(1_000, Steps, 1, Seed);
         Assert.Throws<ArgumentException>(() =>
-            new FXBasketVanillaMCPricer(option, ValuationDate,
-                new Dictionary<string, FxMarketData>(), new Dictionary<string, double>(), cube));
+            new FXBasketVanillaMCPricer(option, ValuationDate, cube));
     }
 
     [Fact]
@@ -313,11 +312,9 @@ public sealed class FXBasketVanillaMCPricerTests
     {
         var option = MakeBasketOption(
             legs: [("EURUSD", 1.0)], BasketAggregationMethod.Unspecified, strike: 1.0, isCall: true);
-        var markets = new Dictionary<string, FxMarketData> { ["EURUSD"] = MakeMarket("EURUSD", 1.10, 0.05, 0.02) };
-        var vols    = new Dictionary<string, double> { ["EURUSD"] = 0.2 };
-        var cube    = SimulationCube.GenerateIndependent(1_000, Steps, 1, Seed);
+        var cube   = SimulationCube.GenerateIndependent(1_000, Steps, 1, Seed);
 
-        Assert.Throws<ArgumentException>(() => new FXBasketVanillaMCPricer(option, ValuationDate, markets, vols, cube));
+        Assert.Throws<ArgumentException>(() => new FXBasketVanillaMCPricer(option, ValuationDate, cube));
     }
 
     [Fact]
@@ -325,11 +322,10 @@ public sealed class FXBasketVanillaMCPricerTests
     {
         var option = MakeBasketOption(
             legs: [("EURUSD", 0.5), ("GBPUSD", 0.5)], BasketAggregationMethod.WeightedSum, strike: 1.0, isCall: true);
-        var legs = MakeTwoLegMarkets(1.10, 0.05, 0.02, 0.20, 1.25, 0.05, 0.01, 0.25, "EURUSD", "GBPUSD");
 
         var wrongCube = SimulationCube.GenerateIndependent(1_000, Steps, assets: 1, Seed); // should be 2
         Assert.Throws<ArgumentException>(() =>
-            new FXBasketVanillaMCPricer(option, ValuationDate, legs.markets, legs.vols, wrongCube));
+            new FXBasketVanillaMCPricer(option, ValuationDate, wrongCube));
     }
 
     [Fact]
@@ -339,11 +335,18 @@ public sealed class FXBasketVanillaMCPricerTests
         // for an FX basket (the "currency pair object" check).
         var option = MakeBasketOption(
             legs: [("AAPL", 1.0)], BasketAggregationMethod.WeightedSum, strike: 1.0, isCall: true);
-        var markets = new Dictionary<string, FxMarketData> { ["AAPL"] = MakeMarket("AAPL", 150.0, 0.05, 0.0) };
-        var vols    = new Dictionary<string, double> { ["AAPL"] = 0.25 };
-        var cube    = SimulationCube.GenerateIndependent(1_000, Steps, 1, Seed);
+        var cube   = SimulationCube.GenerateIndependent(1_000, Steps, 1, Seed);
 
-        Assert.Throws<ArgumentException>(() => new FXBasketVanillaMCPricer(option, ValuationDate, markets, vols, cube));
+        Assert.Throws<ArgumentException>(() => new FXBasketVanillaMCPricer(option, ValuationDate, cube));
+    }
+
+    [Fact]
+    public void ZeroStrike_Throws()
+    {
+        var option = MakeBasketOption(legs: [("EURUSD", 1.0)], BasketAggregationMethod.WeightedSum, strike: 0.0, isCall: true);
+        var cube   = SimulationCube.GenerateIndependent(1_000, Steps, 1, Seed);
+
+        Assert.Throws<ArgumentException>(() => new FXBasketVanillaMCPricer(option, ValuationDate, cube));
     }
 
     [Fact]
@@ -356,7 +359,8 @@ public sealed class FXBasketVanillaMCPricerTests
         var vols    = new Dictionary<string, double> { ["EURUSD"] = 0.20, ["GBPUSD"] = 0.25 };
         var cube    = SimulationCube.GenerateIndependent(1_000, Steps, assets: 2, Seed);
 
-        Assert.Throws<ArgumentException>(() => new FXBasketVanillaMCPricer(option, ValuationDate, markets, vols, cube));
+        using var pricer = new FXBasketVanillaMCPricer(option, ValuationDate, cube);
+        Assert.Throws<ArgumentException>(() => pricer.Price(markets, vols));
     }
 
     [Fact]
@@ -369,18 +373,8 @@ public sealed class FXBasketVanillaMCPricerTests
         var vols    = new Dictionary<string, double> { ["EURUSD"] = 0.20 };
         var cube    = SimulationCube.GenerateIndependent(1_000, Steps, 1, Seed);
 
-        Assert.Throws<ArgumentException>(() => new FXBasketVanillaMCPricer(option, ValuationDate, markets, vols, cube));
-    }
-
-    [Fact]
-    public void ZeroStrike_Throws()
-    {
-        var option = MakeBasketOption(legs: [("EURUSD", 1.0)], BasketAggregationMethod.WeightedSum, strike: 0.0, isCall: true);
-        var markets = new Dictionary<string, FxMarketData> { ["EURUSD"] = MakeMarket("EURUSD", 1.10, 0.05, 0.02) };
-        var vols    = new Dictionary<string, double> { ["EURUSD"] = 0.20 };
-        var cube    = SimulationCube.GenerateIndependent(1_000, Steps, 1, Seed);
-
-        Assert.Throws<ArgumentException>(() => new FXBasketVanillaMCPricer(option, ValuationDate, markets, vols, cube));
+        using var pricer = new FXBasketVanillaMCPricer(option, ValuationDate, cube);
+        Assert.Throws<ArgumentException>(() => pricer.Price(markets, vols));
     }
 
     [Fact]
@@ -391,7 +385,8 @@ public sealed class FXBasketVanillaMCPricerTests
         var vols    = new Dictionary<string, double> { ["EURUSD"] = -0.1 };
         var cube    = SimulationCube.GenerateIndependent(1_000, Steps, 1, Seed);
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => new FXBasketVanillaMCPricer(option, ValuationDate, markets, vols, cube));
+        using var pricer = new FXBasketVanillaMCPricer(option, ValuationDate, cube);
+        Assert.Throws<ArgumentOutOfRangeException>(() => pricer.Price(markets, vols));
     }
 
     // ── CurrencyPair parsing — exercised indirectly through the public ctor ───
@@ -410,11 +405,9 @@ public sealed class FXBasketVanillaMCPricerTests
         // the point here is purely that construction succeeds, i.e. `id` parses
         // as a valid currency pair.
         var option = MakeBasketOption(legs: [(id, 1.0)], BasketAggregationMethod.WeightedSum, strike: 1.0, isCall: true);
-        var markets = new Dictionary<string, FxMarketData> { [id] = MakeMarket(id, 1.10, 0.05, 0.02) };
-        var vols    = new Dictionary<string, double> { [id] = 0.20 };
-        var cube    = SimulationCube.GenerateIndependent(1_000, Steps, 1, Seed);
+        var cube   = SimulationCube.GenerateIndependent(1_000, Steps, 1, Seed);
 
-        using var pricer = new FXBasketVanillaMCPricer(option, ValuationDate, markets, vols, cube);
+        using var pricer = new FXBasketVanillaMCPricer(option, ValuationDate, cube);
         Assert.Single(pricer.LegNames);
     }
 
@@ -426,12 +419,10 @@ public sealed class FXBasketVanillaMCPricerTests
     [InlineData("EU/USD")]     // base too short
     public void MalformedCurrencyPairIdentifiers_AreRejected(string id)
     {
-        var option  = MakeBasketOption(legs: [(id, 1.0)], BasketAggregationMethod.WeightedSum, strike: 1.0, isCall: true);
-        var markets = new Dictionary<string, FxMarketData> { [id] = MakeMarket(id, 1.10, 0.05, 0.02) };
-        var vols    = new Dictionary<string, double> { [id] = 0.20 };
-        var cube    = SimulationCube.GenerateIndependent(1_000, Steps, 1, Seed);
+        var option = MakeBasketOption(legs: [(id, 1.0)], BasketAggregationMethod.WeightedSum, strike: 1.0, isCall: true);
+        var cube   = SimulationCube.GenerateIndependent(1_000, Steps, 1, Seed);
 
-        Assert.Throws<ArgumentException>(() => new FXBasketVanillaMCPricer(option, ValuationDate, markets, vols, cube));
+        Assert.Throws<ArgumentException>(() => new FXBasketVanillaMCPricer(option, ValuationDate, cube));
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

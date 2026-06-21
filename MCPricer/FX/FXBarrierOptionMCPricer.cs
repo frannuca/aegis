@@ -1,5 +1,6 @@
 using Aegis.Instruments;
 using RandomSimulator;
+using NodaTime;
 
 namespace MCPricer.FX;
 
@@ -32,9 +33,9 @@ namespace MCPricer.FX;
 ///     the path index (xor with a salt). A different seed per step index is
 ///     achieved by seeding a new Random per (path, step) pair.
 ///
-/// Model: same Garman-Kohlhagen GBM as FXMCPricer (see base class header).
+/// Model: Garman-Kohlhagen GBM — see GbmOptionMCPricer class header.
 /// </summary>
-public sealed class FXBarrierOptionMCPricer : FXMCPricer
+public sealed class FXBarrierOptionMCPricer : GbmOptionMCPricer
 {
     private readonly double             _strike;
     private readonly double             _phi;          // +1 call, −1 put
@@ -42,15 +43,13 @@ public sealed class FXBarrierOptionMCPricer : FXMCPricer
     private readonly BarrierType        _barrierType;
     private readonly BarrierObservation _observation;
     private readonly double             _rebate;
-    private readonly double             _sigSqDt;      // σ²·dt, for bridge formula
 
     public FXBarrierOptionMCPricer(
         Option         option,
-        DateOnly       valuationDate,
-        FxMarketData   market,
+        LocalDate       valuationDate,
         double         volatility,
         SimulationCube cube)
-        : base(option, valuationDate, market, volatility, cube)
+        : base(option, valuationDate, volatility, cube)
     {
         if (option.KindCase != Option.KindOneofCase.Barrier)
             throw new ArgumentException("Option.Kind must be Barrier.", nameof(option));
@@ -67,7 +66,6 @@ public sealed class FXBarrierOptionMCPricer : FXMCPricer
         _barrierType  = barrier.BarrierType;
         _observation  = barrier.Observation;
         _rebate       = barrier.Rebate;
-        _sigSqDt      = volatility * volatility * Dt;
     }
 
     protected override double EvaluatePayoff(ReadOnlySpan<double> spotPath)
@@ -76,7 +74,7 @@ public sealed class FXBarrierOptionMCPricer : FXMCPricer
             ? CheckDiscreteBarrier(spotPath)
             : CheckContinuousBarrier(spotPath);
 
-        var terminal    = spotPath[^1];
+        var terminal      = spotPath[^1];
         var vanillaPayoff = Math.Max(_phi * (terminal - _strike), 0.0);
 
         return _barrierType switch
@@ -105,8 +103,9 @@ public sealed class FXBarrierOptionMCPricer : FXMCPricer
         // Bridge draws are seeded per (path, step) for reproducibility.
         // Salt 0x9E3779B9 distributes the seed space; step is mixed in below.
         var pathSeed = CurrentPathIndex ^ unchecked((int)0x9E3779B9u);
+        var sigSqDt  = SigSqDt;  // σ²·dt from base class (set by PrepareFromMarket)
 
-        var prev = Market.Spot;
+        var prev = InitialSpot;   // was Market.Spot in old FXMCPricer
         for (var t = 0; t < spotPath.Length; t++)
         {
             var curr = spotPath[t];
@@ -115,9 +114,9 @@ public sealed class FXBarrierOptionMCPricer : FXMCPricer
                 return true;
 
             // If both endpoints are on the safe side, sample the crossing probability.
-            if (!IsBreached(prev) && _sigSqDt > 0.0)
+            if (!IsBreached(prev) && sigSqDt > 0.0)
             {
-                var pCross = BridgeCrossingProb(prev, curr, _barrierLevel, _sigSqDt);
+                var pCross = BridgeCrossingProb(prev, curr, _barrierLevel, sigSqDt);
                 if (pCross > 0.0)
                 {
                     // Deterministic per (path, step) — new Random is cheap for a single draw.
@@ -169,20 +168,13 @@ public sealed class FXBarrierOptionMCPricer : FXMCPricer
     /// </summary>
     protected override MCBasePricer CreateBumped(BumpType bump, double epsilon)
     {
-        var m   = Market.Clone();
         var vol = Volatility;
         switch (bump)
         {
-            case BumpType.SpotUp:           m.Spot         += epsilon;                         break;
-            case BumpType.SpotDown:         m.Spot         -= epsilon;                         break;
-            case BumpType.VolUp:            vol            += epsilon;                         break;
-            case BumpType.VolDown:          vol             = Math.Max(0.0, vol - epsilon);    break;
-            case BumpType.RateUp:           m.DomesticRate = ZeroCurve.Shift(m.DomesticRate,  epsilon);  break;
-            case BumpType.RateDown:         m.DomesticRate = ZeroCurve.Shift(m.DomesticRate, -epsilon);  break;
-            case BumpType.ForeignRateUp:    m.ForeignRate  = ZeroCurve.Shift(m.ForeignRate,   epsilon);  break;
-            case BumpType.ForeignRateDown:  m.ForeignRate  = ZeroCurve.Shift(m.ForeignRate,  -epsilon);  break;
-            default: throw new NotSupportedException($"Bump {bump} not supported by {GetType().Name}.");
+            case BumpType.VolUp:   vol += epsilon;                          break;
+            case BumpType.VolDown: vol  = Math.Max(0.0, vol - epsilon);    break;
+            default: throw new NotSupportedException($"Bump {bump} not supported by {GetType().Name}. Use ComputeGreeks(market, ...) for spot and rate bumps.");
         }
-        return new FXBarrierOptionMCPricer(OptionDef, ValuationDate, m, vol, Cube);
+        return new FXBarrierOptionMCPricer(OptionDef, ValuationDate, vol, Cube);
     }
 }

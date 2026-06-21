@@ -1,5 +1,6 @@
 using Aegis.Instruments;
 using RandomSimulator;
+using NodaTime;
 
 namespace MCPricer.FX;
 
@@ -56,7 +57,7 @@ public abstract class FXMCPricer : MCBasePricer
 {
     protected readonly FxMarketData Market;
     protected readonly Option       OptionDef;
-    protected readonly DateOnly     ValuationDate;
+    protected readonly LocalDate     ValuationDate;
     protected readonly double       Dt;
     protected readonly double       Volatility;
     protected readonly double       DiscountFactor;
@@ -88,7 +89,7 @@ public abstract class FXMCPricer : MCBasePricer
 
     protected FXMCPricer(
         Option         option,
-        DateOnly       valuationDate,
+        LocalDate       valuationDate,
         FxMarketData   market,
         double         volatility,
         SimulationCube cube) : base(cube)

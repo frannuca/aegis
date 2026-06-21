@@ -1,5 +1,6 @@
 using Aegis.Instruments;
 using RandomSimulator;
+using NodaTime;
 
 namespace MCPricer.FX;
 
@@ -24,7 +25,7 @@ namespace MCPricer.FX;
 ///   σ = 0: path is deterministic; payoff is determined by the forward
 ///   F = S·e^{(r_d − r_f)·T} versus K (see DigitalBlackScholes XML doc).
 /// </summary>
-public sealed class FXDigitalOptionMCPricer : FXMCPricer
+public sealed class FXDigitalOptionMCPricer : GbmOptionMCPricer
 {
     private readonly double                _strike;
     private readonly double                _phi;   // +1 for call, −1 for put
@@ -33,11 +34,10 @@ public sealed class FXDigitalOptionMCPricer : FXMCPricer
 
     public FXDigitalOptionMCPricer(
         Option         option,
-        DateOnly       valuationDate,
-        FxMarketData   market,
+        LocalDate       valuationDate,
         double         volatility,
         SimulationCube cube)
-        : base(option, valuationDate, market, volatility, cube)
+        : base(option, valuationDate, volatility, cube)
     {
         if (option.Strike <= 0)
             throw new ArgumentException("Strike must be positive.", nameof(option));
@@ -67,20 +67,13 @@ public sealed class FXDigitalOptionMCPricer : FXMCPricer
 
     protected override MCBasePricer CreateBumped(BumpType bump, double epsilon)
     {
-        var m   = Market.Clone();
         var vol = Volatility;
         switch (bump)
         {
-            case BumpType.SpotUp:           m.Spot         += epsilon;                         break;
-            case BumpType.SpotDown:         m.Spot         -= epsilon;                         break;
-            case BumpType.VolUp:            vol            += epsilon;                         break;
-            case BumpType.VolDown:          vol             = Math.Max(0.0, vol - epsilon);    break;
-            case BumpType.RateUp:           m.DomesticRate = ZeroCurve.Shift(m.DomesticRate,  epsilon);  break;
-            case BumpType.RateDown:         m.DomesticRate = ZeroCurve.Shift(m.DomesticRate, -epsilon);  break;
-            case BumpType.ForeignRateUp:    m.ForeignRate  = ZeroCurve.Shift(m.ForeignRate,   epsilon);  break;
-            case BumpType.ForeignRateDown:  m.ForeignRate  = ZeroCurve.Shift(m.ForeignRate,  -epsilon);  break;
-            default: throw new NotSupportedException($"Bump {bump} not supported by {GetType().Name}.");
+            case BumpType.VolUp:   vol += epsilon;                          break;
+            case BumpType.VolDown: vol  = Math.Max(0.0, vol - epsilon);    break;
+            default: throw new NotSupportedException($"Bump {bump} not supported by {GetType().Name}. Use ComputeGreeks(market, ...) for spot and rate bumps.");
         }
-        return new FXDigitalOptionMCPricer(OptionDef, ValuationDate, m, vol, Cube);
+        return new FXDigitalOptionMCPricer(OptionDef, ValuationDate, vol, Cube);
     }
 }

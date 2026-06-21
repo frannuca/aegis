@@ -2,6 +2,7 @@ using Aegis.Instruments;
 using AnalyticalPricers;
 using MCPricer.FX;
 using RandomSimulator;
+using NodaTime;
 
 namespace MCPricer.Tests;
 
@@ -47,12 +48,8 @@ public sealed class FXVanillaOptionMCPricerTests
     private const int Steps      = 1;       // single step suffices for European payoffs
     private const int DefaultSeed = 42;
 
-    // Pricers now take rates as Pillars zero-rate curves (term structures), interpolated
-    // at the option's expiry from this valuation date — see ZeroCurve.InterpolateRate.
-    // Tests use single-pillar "flat" curves so the interpolated rate equals the scalar
-    // reference rate (Rd, Rf) regardless of T, keeping the GK analytical comparison exact.
-    private static readonly DateOnly ValuationDate = new(2026, 1, 1);
-    private static readonly DateOnly CurveMaturity = new(2036, 1, 1);
+    private static readonly LocalDate ValuationDate = new(2026, 1, 1);
+    private static readonly LocalDate CurveMaturity = new(2036, 1, 1);
 
     // ── Garman-Kohlhagen price tests ──────────────────────────────────────────
 
@@ -73,7 +70,6 @@ public sealed class FXVanillaOptionMCPricerTests
     [Fact]
     public void OtmCall_MatchesGarmanKohlhagen()
     {
-        // K = 1.20 is ~9% OTM for a spot of 1.10
         var (mc, gk) = RunAndCompare(S0, strike: 1.20, T, Sigma, Rd, Rf, isCall: true);
         AssertWithinMcBounds(mc, gk, sigma: 5.0);
     }
@@ -81,7 +77,6 @@ public sealed class FXVanillaOptionMCPricerTests
     [Fact]
     public void ItmCall_MatchesGarmanKohlhagen()
     {
-        // K = 1.00 is ~9% ITM
         var (mc, gk) = RunAndCompare(S0, strike: 1.00, T, Sigma, Rd, Rf, isCall: true);
         AssertWithinMcBounds(mc, gk, sigma: 5.0);
     }
@@ -110,7 +105,6 @@ public sealed class FXVanillaOptionMCPricerTests
     [Fact]
     public void ShortExpiry_MatchesGarmanKohlhagen()
     {
-        // T = 1 week: strong time-step approximation test (single-step for European is exact)
         var (mc, gk) = RunAndCompare(S0, K, expiry: 1.0 / 52, Sigma, Rd, Rf, isCall: true);
         AssertWithinMcBounds(mc, gk, sigma: 5.0);
     }
@@ -125,7 +119,6 @@ public sealed class FXVanillaOptionMCPricerTests
     [Fact]
     public void ZeroForeignRate_MatchesGarmanKohlhagen()
     {
-        // r_f = 0 reduces GK to the standard Black-Scholes call formula
         var (mc, gk) = RunAndCompare(S0, K, T, Sigma, Rd, rf: 0.0, isCall: true);
         AssertWithinMcBounds(mc, gk, sigma: 5.0);
     }
@@ -140,7 +133,6 @@ public sealed class FXVanillaOptionMCPricerTests
     [Fact]
     public void EqualRates_MatchesGarmanKohlhagen()
     {
-        // r_d = r_f: forward = spot, so ATM forward = ATM spot
         var (mc, gk) = RunAndCompare(S0, K, T, Sigma, rd: 0.03, rf: 0.03, isCall: true);
         AssertWithinMcBounds(mc, gk, sigma: 5.0);
     }
@@ -150,9 +142,6 @@ public sealed class FXVanillaOptionMCPricerTests
     [Fact]
     public void DailySteps_MatchesSingleStep_WithinMcNoise()
     {
-        // A European option price must be independent of the number of time steps
-        // because only terminal spot enters the payoff. Both pricers run on
-        // independent cubes; we compare their prices to GK rather than each other.
         const int dailySteps = 252;
 
         var cube1Step    = SimulationCube.GenerateIndependent(Paths, 1,          1, DefaultSeed);
@@ -174,18 +163,14 @@ public sealed class FXVanillaOptionMCPricerTests
     [InlineData(1.20, "OTM call / ITM put")]
     public void PutCallParity_HoldsWithinMcNoise(double strike, string _)
     {
-        // Call - Put = S·e^{-r_f·T} - K·e^{-r_d·T}
-        // Use the same cube for both pricers to minimise cancellation noise.
-        // With the same paths, Call_MC - Put_MC ≈ exact even at low path counts.
         var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mcCall = BuildPricer(S0, strike, T, Sigma, Rd, Rf, true,  cube).Price();
-        var mcPut  = BuildPricer(S0, strike, T, Sigma, Rd, Rf, false, cube).Price();
+        var market = MakeMarket(S0, Rd, Rf);
+        var mcCall = BuildPricer(S0, strike, T, Sigma, Rd, Rf, true,  cube).Price(market);
+        var mcPut  = BuildPricer(S0, strike, T, Sigma, Rd, Rf, false, cube).Price(market);
 
-        var mcParity       = mcCall.Price - mcPut.Price;
+        var mcParity         = mcCall.Price - mcPut.Price;
         var analyticalParity = S0 * Math.Exp(-Rf * T) - strike * Math.Exp(-Rd * T);
 
-        // SE of the difference: for same cube, payoffs are perfectly anti-correlated
-        // for ATM, so SE_diff < SE_call + SE_put. Use sum as conservative bound.
         var seDiff = mcCall.StandardError + mcPut.StandardError;
 
         Assert.True(Math.Abs(mcParity - analyticalParity) < 5.0 * seDiff,
@@ -198,26 +183,23 @@ public sealed class FXVanillaOptionMCPricerTests
     [Fact]
     public void ZeroVol_ItmCall_PricesAtDiscountedIntrinsic()
     {
-        // σ = 0: path is deterministic, S(T) = S·exp((r_d-r_f)·T).
-        // Call price = max(F·e^{-r_d·T} - K·e^{-r_d·T}, 0) = e^{-r_d·T}·max(F-K, 0)
-        // where F = S·e^{(r_d-r_f)·T} is the forward.
-        var forward   = S0 * Math.Exp((Rd - Rf) * T);
-        var expected  = Math.Exp(-Rd * T) * Math.Max(forward - K, 0.0);
+        var forward  = S0 * Math.Exp((Rd - Rf) * T);
+        var expected = Math.Exp(-Rd * T) * Math.Max(forward - K, 0.0);
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildPricer(S0, K, T, sigma: 0.0, Rd, Rf, isCall: true, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, Rd, Rf);
+        var mc     = BuildPricer(S0, K, T, sigma: 0.0, Rd, Rf, isCall: true, cube).Price(market);
 
-        Assert.Equal(expected, mc.Price, precision: 10);   // exact: deterministic path
+        Assert.Equal(expected, mc.Price, precision: 10);
     }
 
     [Fact]
     public void ZeroVol_OtmCall_PricesAtZero()
     {
-        // Forward S·e^{(r_d-r_f)·T} < K when r_d - r_f < log(K/S)/T.
-        // Here S=1.10, K=1.30, r_d=0.02, r_f=0.05, T=1: forward ≈ 1.067 < 1.30
         const double otmStrike = 1.30;
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildPricer(S0, otmStrike, T, sigma: 0.0, rd: 0.02, rf: 0.05, isCall: true, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, rd: 0.02, rf: 0.05);
+        var mc     = BuildPricer(S0, otmStrike, T, sigma: 0.0, rd: 0.02, rf: 0.05, isCall: true, cube).Price(market);
 
         Assert.Equal(0.0, mc.Price, precision: 10);
     }
@@ -225,41 +207,33 @@ public sealed class FXVanillaOptionMCPricerTests
     [Fact]
     public void ZeroVol_GarmanKohlhagen_Agrees()
     {
-        // With σ→0, GK formula degenerates to the same discounted-intrinsic value.
-        // Use σ=1e-8 (not exactly 0) for GK (NaN-safe); MC uses σ=0 exactly.
         const double tinyVol = 1e-8;
-        var gk = GarmanKohlhagen.Price(S0, K, T, tinyVol, Rd, Rf, isCall: true);
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildPricer(S0, K, T, sigma: 0.0, Rd, Rf, isCall: true, cube).Price();
+        var gk     = GarmanKohlhagen.Price(S0, K, T, tinyVol, Rd, Rf, isCall: true);
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, Rd, Rf);
+        var mc     = BuildPricer(S0, K, T, sigma: 0.0, Rd, Rf, isCall: true, cube).Price(market);
 
         Assert.Equal(gk, mc.Price, precision: 6);
     }
 
     // ── Convergence: Sobol beats pseudo-random at low path count ─────────────
 
-    /// <summary>
-    /// At N = 2048 paths, the Sobol error must be smaller than the median
-    /// pseudo-random error over 101 seeds.
-    ///
-    /// This validates that the pricer correctly reads from the cube's
-    /// quasi-random draws and that Sobol's O((log N)/N) convergence holds
-    /// for this smooth payoff.
-    /// </summary>
     [Fact]
     public void Sobol_ConvergesFasterThanPseudo_ForAtmCall()
     {
         const int lowPaths = 2048;
-        var gk = GarmanKohlhagen.Price(S0, K, T, Sigma, Rd, Rf, isCall: true);
+        var gk     = GarmanKohlhagen.Price(S0, K, T, Sigma, Rd, Rf, isCall: true);
+        var market = MakeMarket(S0, Rd, Rf);
 
         var sobolCube  = SimulationCube.GenerateIndependent(lowPaths, 1, 1, method: SamplingMethod.QuasiRandom);
-        var sobolPrice = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, sobolCube).Price().Price;
+        var sobolPrice = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, sobolCube).Price(market).Price;
         var sobolError = Math.Abs(sobolPrice - gk);
 
         var pseudoErrors = new double[101];
         for (var seed = 0; seed < pseudoErrors.Length; seed++)
         {
             var cube  = SimulationCube.GenerateIndependent(lowPaths, 1, 1, seed: seed, method: SamplingMethod.PseudoRandom);
-            var price = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube).Price().Price;
+            var price = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube).Price(market).Price;
             pseudoErrors[seed] = Math.Abs(price - gk);
         }
         Array.Sort(pseudoErrors);
@@ -275,13 +249,14 @@ public sealed class FXVanillaOptionMCPricerTests
     [Fact]
     public void Antithetics_ReduceStandardError()
     {
-        const int halfPaths = 50_000;   // antithetic cube has halfPaths×2 = 100k paths total
+        const int halfPaths = 50_000;
 
-        var cubeNo  = SimulationCube.GenerateIndependent(halfPaths * 2, 1, 1, seed: 77, useAntithetics: false);
-        var cubeAV  = SimulationCube.GenerateIndependent(halfPaths * 2, 1, 1, seed: 77, useAntithetics: true);
+        var cubeNo = SimulationCube.GenerateIndependent(halfPaths * 2, 1, 1, seed: 77, useAntithetics: false);
+        var cubeAV = SimulationCube.GenerateIndependent(halfPaths * 2, 1, 1, seed: 77, useAntithetics: true);
+        var market = MakeMarket(S0, Rd, Rf);
 
-        var seNo = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cubeNo).Price().StandardError;
-        var seAV = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cubeAV).Price().StandardError;
+        var seNo = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cubeNo).Price(market).StandardError;
+        var seAV = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cubeAV).Price(market).StandardError;
 
         Assert.True(seAV < seNo,
             $"Antithetic SE {seAV:F6} must be less than plain SE {seNo:F6}");
@@ -308,9 +283,9 @@ public sealed class FXVanillaOptionMCPricerTests
     [Fact]
     public void ZeroSpot_Throws()
     {
-        var cube = SimulationCube.GenerateIndependent(100, 1, 1);
-        Assert.Throws<ArgumentException>(() =>
-            BuildPricer(spot: 0.0, K, T, Sigma, Rd, Rf, true, cube));
+        var cube   = SimulationCube.GenerateIndependent(100, 1, 1);
+        var pricer = BuildPricer(spot: 0.0, K, T, Sigma, Rd, Rf, true, cube);
+        Assert.Throws<ArgumentException>(() => pricer.Price(MakeMarket(spot: 0.0, Rd, Rf)));
     }
 
     [Fact]
@@ -324,7 +299,6 @@ public sealed class FXVanillaOptionMCPricerTests
     [Fact]
     public void WrongOptionKind_Throws()
     {
-        // Passing a BarrierOption to the vanilla pricer must throw.
         var cube = SimulationCube.GenerateIndependent(100, 1, 1);
         var barrierOpt = new Option
         {
@@ -339,9 +313,8 @@ public sealed class FXVanillaOptionMCPricerTests
                 Observation  = BarrierObservation.Discrete
             }
         };
-        var market = MakeMarket(S0, Rd, Rf);
         Assert.Throws<ArgumentException>(() =>
-            new FXVanillaOptionMCPricer(barrierOpt, ValuationDate, market, Sigma, cube));
+            new FXVanillaOptionMCPricer(barrierOpt, ValuationDate, Sigma, cube));
     }
 
     // ── Async pricing ─────────────────────────────────────────────────────────
@@ -349,10 +322,11 @@ public sealed class FXVanillaOptionMCPricerTests
     [Fact]
     public async Task PriceAsync_NoToken_MatchesGarmanKohlhagen()
     {
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
         using var pricer = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube);
+        var market = MakeMarket(S0, Rd, Rf);
 
-        var result = await pricer.PriceAsync();
+        var result = await pricer.PriceAsync(market);
         var gk     = GarmanKohlhagen.Price(S0, K, T, Sigma, Rd, Rf, isCall: true);
 
         AssertWithinMcBounds(result, gk, sigma: 5.0);
@@ -361,17 +335,13 @@ public sealed class FXVanillaOptionMCPricerTests
     [Fact]
     public async Task PriceAsync_DefaultToken_MatchesSyncPrice()
     {
-        // Async and sync must agree within floating-point rounding from parallel
-        // summation order — well within one standard error of each other.
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
         using var pricer = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube);
+        var gk     = GarmanKohlhagen.Price(S0, K, T, Sigma, Rd, Rf, isCall: true);
+        var market = MakeMarket(S0, Rd, Rf);
+        var sync   = pricer.Price(market);
+        var async_ = await pricer.PriceAsync(market);
 
-        var gk   = GarmanKohlhagen.Price(S0, K, T, Sigma, Rd, Rf, isCall: true);
-        var sync  = pricer.Price();
-        var async_ = await pricer.PriceAsync();
-
-        // Both must be close to GK; the exact values may differ due to parallel
-        // addition reordering, so we compare each independently to the reference.
         AssertWithinMcBounds(sync,   gk, sigma: 5.0);
         AssertWithinMcBounds(async_, gk, sigma: 5.0);
     }
@@ -381,26 +351,20 @@ public sealed class FXVanillaOptionMCPricerTests
     [Fact]
     public async Task PriceAsync_PreCancelledToken_ThrowsImmediately()
     {
-        // When the token is already cancelled, Task.Run cancels the task before
-        // the lambda body runs and throws TaskCanceledException (a subclass of
-        // OperationCanceledException). ThrowsAnyAsync matches any assignable type.
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
         using var pricer = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube);
+        var market = MakeMarket(S0, Rd, Rf);
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => pricer.PriceAsync(cts.Token));
+            () => pricer.PriceAsync(market, cts.Token));
     }
 
     [Fact]
     public async Task PriceAsync_CancelledDuringRun_ThrowsOperationCanceledException()
     {
-        // SlowMCPricer sleeps 1 ms per path, making each path's latency hardware-
-        // independent. With 1000 paths and CancelAfter(10 ms), at most ~10 × num_cores
-        // paths complete before the token fires, leaving hundreds outstanding.
-        // The per-path ct.ThrowIfCancellationRequested() in RunParallel then raises OCE.
         using var cts    = new CancellationTokenSource(TimeSpan.FromMilliseconds(10));
         using var pricer = new SlowMCPricer(paths: 1000);
 
@@ -414,13 +378,12 @@ public sealed class FXVanillaOptionMCPricerTests
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
         using var pricer = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube);
+        var market = MakeMarket(S0, Rd, Rf);
 
-        // ThrowsAnyAsync accepts TaskCanceledException (pre-cancel) and
-        // OperationCanceledException (mid-run cancel) equally.
         var ex = await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => pricer.PriceAsync(cts.Token));
+            () => pricer.PriceAsync(market, cts.Token));
 
         Assert.Equal(cts.Token, ex.CancellationToken);
     }
@@ -428,15 +391,12 @@ public sealed class FXVanillaOptionMCPricerTests
     [Fact]
     public async Task PriceAsync_MultipleConcurrentCalls_AllSucceed()
     {
-        // Same pricer instance, three concurrent async pricings.
-        // ThreadLocal state must keep each call's scratch buffers isolated.
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
         using var pricer = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube);
-        var gk   = GarmanKohlhagen.Price(S0, K, T, Sigma, Rd, Rf, isCall: true);
+        var gk     = GarmanKohlhagen.Price(S0, K, T, Sigma, Rd, Rf, isCall: true);
+        var market = MakeMarket(S0, Rd, Rf);
 
-        var tasks = Enumerable.Range(0, 3)
-                              .Select(_ => pricer.PriceAsync())
-                              .ToArray();
+        var tasks   = Enumerable.Range(0, 3).Select(_ => pricer.PriceAsync(market)).ToArray();
         var results = await Task.WhenAll(tasks);
 
         foreach (var r in results)
@@ -448,8 +408,9 @@ public sealed class FXVanillaOptionMCPricerTests
     [Fact]
     public void PricingResult_ConfidenceIntervalContainsPrice()
     {
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var result = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, Rd, Rf);
+        var result = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube).Price(market);
 
         Assert.True(result.ConfidenceIntervalLower <= result.Price);
         Assert.True(result.Price <= result.ConfidenceIntervalUpper);
@@ -461,7 +422,8 @@ public sealed class FXVanillaOptionMCPricerTests
     public void PricingResult_ConfidenceIntervalWidth_MatchesSe()
     {
         var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var result = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube).Price();
+        var market = MakeMarket(S0, Rd, Rf);
+        var result = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube).Price(market);
 
         const double z95 = 1.959964;
         Assert.Equal(result.ConfidenceIntervalWidth, 2.0 * z95 * result.StandardError, precision: 10);
@@ -498,8 +460,9 @@ public sealed class FXVanillaOptionMCPricerTests
         double spot, double strike, double expiry, double sigma,
         double rd, double rf, bool isCall, SimulationCube cube)
     {
-        var mc = BuildPricer(spot, strike, expiry, sigma, rd, rf, isCall, cube).Price();
-        var gk = GarmanKohlhagen.Price(spot, strike, expiry, sigma, rd, rf, isCall);
+        var market = MakeMarket(spot, rd, rf);
+        var mc     = BuildPricer(spot, strike, expiry, sigma, rd, rf, isCall, cube).Price(market);
+        var gk     = GarmanKohlhagen.Price(spot, strike, expiry, sigma, rd, rf, isCall);
         return (mc, gk);
     }
 
@@ -516,8 +479,7 @@ public sealed class FXVanillaOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Vanilla       = new VanillaOption()
         };
-        var market = MakeMarket(spot, rd, rf);
-        return new FXVanillaOptionMCPricer(option, ValuationDate, market, sigma, cube);
+        return new FXVanillaOptionMCPricer(option, ValuationDate, sigma, cube);
     }
 
     private static FxMarketData MakeMarket(double spot, double rd, double rf) =>
@@ -527,7 +489,7 @@ public sealed class FXVanillaOptionMCPricerTests
             Spot          = spot,
             DomesticRate  = ZeroCurve.Flat(rd, CurveMaturity),
             ForeignRate   = ZeroCurve.Flat(rf, CurveMaturity),
-            VolSurface    = new VolatilitySurface()   // empty surface — flat vol passed separately
+            VolSurface    = new VolatilitySurface()
         };
 
     private static void AssertWithinMcBounds(PricingResult mc, double analytical, double sigma)

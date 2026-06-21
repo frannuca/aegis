@@ -2,6 +2,7 @@ using Aegis.Instruments;
 using AnalyticalPricers;
 using MCPricer.FX;
 using RandomSimulator;
+using NodaTime;
 
 namespace MCPricer.Tests;
 
@@ -52,8 +53,8 @@ public sealed class FXSABRVanillaOptionMCPricerTests
     // at the option's expiry from this valuation date — see ZeroCurve.InterpolateRate.
     // Tests use single-pillar "flat" curves so the interpolated rate equals the scalar
     // reference rate (Rd, Rf) regardless of T, keeping the analytical comparisons exact.
-    private static readonly DateOnly ValuationDate = new(2026, 1, 1);
-    private static readonly DateOnly CurveMaturity = new(2036, 1, 1);
+    private static readonly LocalDate ValuationDate = new(2026, 1, 1);
+    private static readonly LocalDate CurveMaturity = new(2036, 1, 1);
 
     // Reference SABR parameters (lognormal backbone)
     private const double Alpha = 0.20;
@@ -211,8 +212,8 @@ public sealed class FXSABRVanillaOptionMCPricerTests
         var f0   = Forward();
         var cube = BuildCube();
 
-        var call = BuildPricer(strike: f0, alpha: Alpha, beta: Beta1, rho: Rho, nu: Nu, isCall: true,  cube).Price();
-        var put  = BuildPricer(strike: f0, alpha: Alpha, beta: Beta1, rho: Rho, nu: Nu, isCall: false, cube).Price();
+        var call = BuildPricer(strike: f0, alpha: Alpha, beta: Beta1, rho: Rho, nu: Nu, isCall: true,  cube).Price(MakeMarket());
+        var put  = BuildPricer(strike: f0, alpha: Alpha, beta: Beta1, rho: Rho, nu: Nu, isCall: false, cube).Price(MakeMarket());
 
         var mcParity         = call.Price - put.Price;
         var analyticalParity = DiscountFactor() * (f0 - f0);   // ATM: F = K → 0
@@ -229,8 +230,8 @@ public sealed class FXSABRVanillaOptionMCPricerTests
         var k    = f0 * 1.05;
         var cube = BuildCube();
 
-        var call = BuildPricer(strike: k, alpha: Alpha, beta: Beta1, rho: Rho, nu: Nu, isCall: true,  cube).Price();
-        var put  = BuildPricer(strike: k, alpha: Alpha, beta: Beta1, rho: Rho, nu: Nu, isCall: false, cube).Price();
+        var call = BuildPricer(strike: k, alpha: Alpha, beta: Beta1, rho: Rho, nu: Nu, isCall: true,  cube).Price(MakeMarket());
+        var put  = BuildPricer(strike: k, alpha: Alpha, beta: Beta1, rho: Rho, nu: Nu, isCall: false, cube).Price(MakeMarket());
 
         var mcParity         = call.Price - put.Price;
         var analyticalParity = DiscountFactor() * (f0 - k);
@@ -251,8 +252,8 @@ public sealed class FXSABRVanillaOptionMCPricerTests
         var cube50  = SimulationCube.GenerateIndependent(Paths, steps: 50,  assets: 2, seed: DefaultSeed);
         var cube252 = SimulationCube.GenerateIndependent(Paths, steps: 252, assets: 2, seed: DefaultSeed + 1);
 
-        var mc50  = BuildPricer(f0, Alpha, Beta1, Rho, Nu, true, cube50).Price();
-        var mc252 = BuildPricer(f0, Alpha, Beta1, Rho, Nu, true, cube252).Price();
+        var mc50  = BuildPricer(f0, Alpha, Beta1, Rho, Nu, true, cube50).Price(MakeMarket());
+        var mc252 = BuildPricer(f0, Alpha, Beta1, Rho, Nu, true, cube252).Price(MakeMarket());
         var vol   = Hagan.BlackVol(f0, f0, T, Alpha, Beta1, Rho, Nu);
         var ref_  = BlackForward.Call(f0, f0, T, vol) * DiscountFactor();
 
@@ -271,7 +272,7 @@ public sealed class FXSABRVanillaOptionMCPricerTests
         var f0   = Forward();
         var cube = BuildCube();
         using var pricer = BuildPricer(f0, Alpha, Beta1, Rho, Nu, isCall: true, cube);
-        var greeks = pricer.ComputeGreeks(spotEps: 0.01);
+        var greeks = pricer.ComputeGreeks(MakeMarket(), spotEps: 0.01);
 
         Assert.True(double.IsFinite(greeks.Delta), $"Delta={greeks.Delta}");
         Assert.True(greeks.Delta > 0.0, $"ATM call delta should be positive: {greeks.Delta:F4}");
@@ -290,10 +291,11 @@ public sealed class FXSABRVanillaOptionMCPricerTests
         using var pricer = BuildPricer(f0, Alpha, Beta1, Rho, Nu, isCall: true, cube);
 
         const double eps    = 0.001;
-        var up  = pricer.CreateBumped_ForTest(BumpType.VolUp,  eps).Price().Price;
-        var dn  = pricer.CreateBumped_ForTest(BumpType.VolDown, eps).Price().Price;
+        var market     = MakeMarket();
+        var up  = ((FXSABRVanillaOptionMCPricer)pricer.CreateBumped_ForTest(BumpType.VolUp,  eps)).Price(market).Price;
+        var dn  = ((FXSABRVanillaOptionMCPricer)pricer.CreateBumped_ForTest(BumpType.VolDown, eps)).Price(market).Price;
         var directVega = (up - dn) / (2.0 * eps);
-        var greeks     = pricer.ComputeGreeks(volEps: eps);
+        var greeks     = pricer.ComputeGreeks(market, volEps: eps);
 
         Assert.Equal(directVega, greeks.Vega, precision: 10);
     }
@@ -306,7 +308,7 @@ public sealed class FXSABRVanillaOptionMCPricerTests
         var f0   = Forward();
         var cube = BuildCube();
         using var pricer = BuildPricer(f0, Alpha, Beta1, Rho, Nu, isCall: true, cube);
-        var volOfVol = pricer.ComputeVolOfVolSensitivity(nuEps: 0.01);
+        var volOfVol = pricer.ComputeVolOfVolSensitivity(MakeMarket(), nuEps: 0.01);
 
         Assert.True(double.IsFinite(volOfVol), $"Volvol={volOfVol}");
         Assert.True(volOfVol > 0.0, $"Volvol should be positive for a vanilla call: {volOfVol:F4}");
@@ -318,7 +320,7 @@ public sealed class FXSABRVanillaOptionMCPricerTests
         var f0   = Forward();
         var cube = BuildCube();
         using var pricer = BuildPricer(f0, Alpha, Beta1, Rho, Nu, isCall: true, cube);
-        var cs = pricer.ComputeCorrelSensitivity(rhoEps: 0.01);
+        var cs = pricer.ComputeCorrelSensitivity(MakeMarket(), rhoEps: 0.01);
 
         Assert.True(double.IsFinite(cs), $"Correlation sensitivity={cs}");
     }
@@ -378,7 +380,7 @@ public sealed class FXSABRVanillaOptionMCPricerTests
             Barrier    = new BarrierOption { BarrierLevel = 1.30, BarrierType = BarrierType.UpAndOut }
         };
         Assert.Throws<ArgumentException>(() =>
-            new FXSABRVanillaOptionMCPricer(barrierOpt, ValuationDate, MakeMarket(), MakeSabr(Alpha, Beta1, Rho, Nu), cube));
+            new FXSABRVanillaOptionMCPricer(barrierOpt, ValuationDate, MakeSabr(Alpha, Beta1, Rho, Nu), cube));
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -389,7 +391,7 @@ public sealed class FXSABRVanillaOptionMCPricerTests
     private PricingResult RunSabr(
         double strike, double alpha, double beta, double rho, double nu, bool isCall)
     {
-        return BuildPricer(strike, alpha, beta, rho, nu, isCall, BuildCube()).Price();
+        return BuildPricer(strike, alpha, beta, rho, nu, isCall, BuildCube()).Price(MakeMarket());
     }
 
     private FXSABRVanillaOptionMCPricer BuildPricer(
@@ -405,7 +407,7 @@ public sealed class FXSABRVanillaOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Vanilla       = new VanillaOption()
         };
-        return new FXSABRVanillaOptionMCPricer(option, ValuationDate, MakeMarket(), MakeSabr(alpha, beta, rho, nu), cube);
+        return new FXSABRVanillaOptionMCPricer(option, ValuationDate, MakeSabr(alpha, beta, rho, nu), cube);
     }
 
     private static FxMarketData MakeMarket() =>

@@ -2,6 +2,7 @@ using Aegis.Instruments;
 using AnalyticalPricers;
 using MCPricer.FX;
 using RandomSimulator;
+using NodaTime;
 
 namespace MCPricer.Tests;
 
@@ -42,8 +43,8 @@ public sealed class FXAsianOptionMCPricerTests
     private const int Steps       = 12;      // monthly monitoring — enough to make AM ≠ GM meaningfully
     private const int DefaultSeed = 42;
 
-    private static readonly DateOnly ValuationDate = new(2026, 1, 1);
-    private static readonly DateOnly CurveMaturity = new(2036, 1, 1);
+    private static readonly LocalDate ValuationDate = new(2026, 1, 1);
+    private static readonly LocalDate CurveMaturity = new(2036, 1, 1);
 
     // ── Geometric average-price vs. Kemna-Vorst closed form ───────────────────
 
@@ -80,9 +81,10 @@ public sealed class FXAsianOptionMCPricerTests
     [Fact]
     public void ArithmeticAveragePriceCall_AtLeastAsExpensiveAs_GeometricCall_ByJensensInequality()
     {
-        var cube  = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var arith = BuildPricer(S0, K, T, Sigma, Rd, Rf, AsianAveragingMethod.Arithmetic, AsianStrikeStyle.AveragePrice, true, cube).Price();
-        var geo   = BuildPricer(S0, K, T, Sigma, Rd, Rf, AsianAveragingMethod.Geometric,  AsianStrikeStyle.AveragePrice, true, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, Rd, Rf);
+        var arith  = BuildPricer(S0, K, T, Sigma, Rd, Rf, AsianAveragingMethod.Arithmetic, AsianStrikeStyle.AveragePrice, true, cube).Price(market);
+        var geo    = BuildPricer(S0, K, T, Sigma, Rd, Rf, AsianAveragingMethod.Geometric,  AsianStrikeStyle.AveragePrice, true, cube).Price(market);
 
         Assert.True(arith.Price >= geo.Price - 1e-9,
             $"Arithmetic call price {arith.Price:F6} must be ≥ geometric call price {geo.Price:F6} " +
@@ -92,9 +94,10 @@ public sealed class FXAsianOptionMCPricerTests
     [Fact]
     public void ArithmeticAveragePricePut_AtMostAsExpensiveAs_GeometricPut_ByJensensInequality()
     {
-        var cube  = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var arith = BuildPricer(S0, K, T, Sigma, Rd, Rf, AsianAveragingMethod.Arithmetic, AsianStrikeStyle.AveragePrice, false, cube).Price();
-        var geo   = BuildPricer(S0, K, T, Sigma, Rd, Rf, AsianAveragingMethod.Geometric,  AsianStrikeStyle.AveragePrice, false, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, Rd, Rf);
+        var arith  = BuildPricer(S0, K, T, Sigma, Rd, Rf, AsianAveragingMethod.Arithmetic, AsianStrikeStyle.AveragePrice, false, cube).Price(market);
+        var geo    = BuildPricer(S0, K, T, Sigma, Rd, Rf, AsianAveragingMethod.Geometric,  AsianStrikeStyle.AveragePrice, false, cube).Price(market);
 
         Assert.True(arith.Price <= geo.Price + 1e-9,
             $"Arithmetic put price {arith.Price:F6} must be ≤ geometric put price {geo.Price:F6} " +
@@ -110,8 +113,9 @@ public sealed class FXAsianOptionMCPricerTests
         var average  = path.Average();
         var expected = Math.Exp(-Rd * T) * Math.Max(average - K, 0.0);
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildPricer(S0, K, T, sigma: 0.0, Rd, Rf, AsianAveragingMethod.Arithmetic, AsianStrikeStyle.AveragePrice, isCall: true, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, Rd, Rf);
+        var mc     = BuildPricer(S0, K, T, sigma: 0.0, Rd, Rf, AsianAveragingMethod.Arithmetic, AsianStrikeStyle.AveragePrice, isCall: true, cube).Price(market);
 
         Assert.Equal(expected, mc.Price, precision: 10);
     }
@@ -123,8 +127,9 @@ public sealed class FXAsianOptionMCPricerTests
         var average  = Math.Exp(path.Select(x => Math.Log(x)).Average());
         var expected = Math.Exp(-Rd * T) * Math.Max(average - K, 0.0);
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildPricer(S0, K, T, sigma: 0.0, Rd, Rf, AsianAveragingMethod.Geometric, AsianStrikeStyle.AveragePrice, isCall: true, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, Rd, Rf);
+        var mc     = BuildPricer(S0, K, T, sigma: 0.0, Rd, Rf, AsianAveragingMethod.Geometric, AsianStrikeStyle.AveragePrice, isCall: true, cube).Price(market);
 
         Assert.Equal(expected, mc.Price, precision: 10);
     }
@@ -138,8 +143,9 @@ public sealed class FXAsianOptionMCPricerTests
         var terminal = path[^1];
         var expected = Math.Exp(-Rd * T) * Math.Max(terminal - average, 0.0);
 
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc   = BuildPricer(S0, strike: 0.0, T, sigma: 0.0, Rd, Rf, AsianAveragingMethod.Arithmetic, AsianStrikeStyle.AverageStrike, isCall: true, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(S0, Rd, Rf);
+        var mc     = BuildPricer(S0, strike: 0.0, T, sigma: 0.0, Rd, Rf, AsianAveragingMethod.Arithmetic, AsianStrikeStyle.AverageStrike, isCall: true, cube).Price(market);
 
         Assert.Equal(expected, mc.Price, precision: 10);
     }
@@ -159,9 +165,8 @@ public sealed class FXAsianOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Vanilla       = new VanillaOption()
         };
-        var market = MakeMarket(S0, Rd, Rf);
         Assert.Throws<ArgumentException>(() =>
-            new FXAsianOptionMCPricer(vanillaOpt, ValuationDate, market, Sigma, cube));
+            new FXAsianOptionMCPricer(vanillaOpt, ValuationDate, Sigma, cube));
     }
 
     [Fact]
@@ -177,9 +182,8 @@ public sealed class FXAsianOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Asian         = new AsianOption { StrikeStyle = AsianStrikeStyle.AveragePrice }
         };
-        var market = MakeMarket(S0, Rd, Rf);
         Assert.Throws<ArgumentException>(() =>
-            new FXAsianOptionMCPricer(option, ValuationDate, market, Sigma, cube));
+            new FXAsianOptionMCPricer(option, ValuationDate, Sigma, cube));
     }
 
     [Fact]
@@ -195,9 +199,8 @@ public sealed class FXAsianOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Asian         = new AsianOption { AveragingMethod = AsianAveragingMethod.Arithmetic }
         };
-        var market = MakeMarket(S0, Rd, Rf);
         Assert.Throws<ArgumentException>(() =>
-            new FXAsianOptionMCPricer(option, ValuationDate, market, Sigma, cube));
+            new FXAsianOptionMCPricer(option, ValuationDate, Sigma, cube));
     }
 
     [Fact]
@@ -214,9 +217,10 @@ public sealed class FXAsianOptionMCPricerTests
         double spot, double strike, double expiry, double sigma,
         double rd, double rf, bool isCall)
     {
-        var cube = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        var mc = BuildPricer(spot, strike, expiry, sigma, rd, rf,
-            AsianAveragingMethod.Geometric, AsianStrikeStyle.AveragePrice, isCall, cube).Price();
+        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var market = MakeMarket(spot, rd, rf);
+        var mc     = BuildPricer(spot, strike, expiry, sigma, rd, rf,
+            AsianAveragingMethod.Geometric, AsianStrikeStyle.AveragePrice, isCall, cube).Price(market);
         var kv = GeometricAsian.Price(spot, strike, expiry, sigma, rd, rf, observations: Steps, isCall);
         return (mc, kv);
     }
@@ -235,8 +239,7 @@ public sealed class FXAsianOptionMCPricerTests
             ExerciseStyle = ExerciseStyle.European,
             Asian         = new AsianOption { AveragingMethod = averagingMethod, StrikeStyle = strikeStyle }
         };
-        var market = MakeMarket(spot, rd, rf);
-        return new FXAsianOptionMCPricer(option, ValuationDate, market, sigma, cube);
+        return new FXAsianOptionMCPricer(option, ValuationDate, sigma, cube);
     }
 
     private static FxMarketData MakeMarket(double spot, double rd, double rf) =>
@@ -250,7 +253,7 @@ public sealed class FXAsianOptionMCPricerTests
         };
 
     /// <summary>
-    /// Replicates FXMCPricer.SimulateSpotPath's zero-volatility branch exactly:
+    /// Replicates GbmOptionMCPricer.SimulateSpotPath's zero-volatility branch exactly:
     /// S(t) = S·exp((r_d − r_f)·t) sampled at t_i = i·Δt, Δt = T/steps.
     /// </summary>
     private static double[] DeterministicFxPath(double spot, double rd, double rf, double expiry, int steps)

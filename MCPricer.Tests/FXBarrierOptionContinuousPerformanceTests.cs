@@ -3,6 +3,7 @@ using Aegis.Instruments;
 using MCPricer.FX;
 using RandomSimulator;
 using Xunit.Abstractions;
+using NodaTime;
 
 namespace MCPricer.Tests;
 
@@ -57,8 +58,8 @@ public sealed class FXBarrierOptionContinuousPerformanceTests
     private const int Steps       = 250;     // 250 daily observations over a 1-year trade
     private const int DefaultSeed = 42;
 
-    private static readonly DateOnly ValuationDate = new(2026, 1, 1);
-    private static readonly DateOnly CurveMaturity = new(2036, 1, 1);
+    private static readonly LocalDate ValuationDate = new(2026, 1, 1);
+    private static readonly LocalDate CurveMaturity = new(2036, 1, 1);
 
     // Deliberately generous: a regression-detection ceiling, not an SLA.
     // Typical runs on development hardware finish in low single-digit seconds.
@@ -71,7 +72,7 @@ public sealed class FXBarrierOptionContinuousPerformanceTests
         using var pricer = BuildContinuousBarrier(cube);
 
         var stopwatch = Stopwatch.StartNew();
-        var result = pricer.Price();
+        var result = pricer.Price(MakeMarket());
         stopwatch.Stop();
 
         var elapsedSeconds = stopwatch.Elapsed.TotalSeconds;
@@ -95,7 +96,7 @@ public sealed class FXBarrierOptionContinuousPerformanceTests
         Assert.True(double.IsFinite(result.Price), $"Price must be finite, got {result.Price}");
         Assert.True(result.Price >= 0.0, $"Price must be non-negative, got {result.Price:F6}");
 
-        var vanilla = BuildVanilla(cube).Price();
+        var vanilla = BuildVanilla(cube).Price(MakeMarket());
         var slack   = 5.0 * (result.StandardError + vanilla.StandardError);
         Assert.True(result.Price <= vanilla.Price + slack,
             $"Knock-out price {result.Price:F6} must not exceed vanilla price {vanilla.Price:F6} " +
@@ -119,7 +120,7 @@ public sealed class FXBarrierOptionContinuousPerformanceTests
                 Rebate       = 0.0
             }
         };
-        return new FXBarrierOptionMCPricer(option, ValuationDate, MakeMarket(), Sigma, cube);
+        return new FXBarrierOptionMCPricer(option, ValuationDate, Sigma, cube);
     }
 
     private static FXVanillaOptionMCPricer BuildVanilla(SimulationCube cube)
@@ -133,7 +134,7 @@ public sealed class FXBarrierOptionContinuousPerformanceTests
             ExerciseStyle = ExerciseStyle.European,
             Vanilla       = new VanillaOption()
         };
-        return new FXVanillaOptionMCPricer(option, ValuationDate, MakeMarket(), Sigma, cube);
+        return new FXVanillaOptionMCPricer(option, ValuationDate, Sigma, cube);
     }
 
     private static FxMarketData MakeMarket() =>
