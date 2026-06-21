@@ -8,32 +8,36 @@ namespace MCPricer.FX;
 /// Abstract MC pricer for FX options under the Garman-Kohlhagen model.
 ///
 /// Stochastic process (domestic risk-neutral measure, Q^d):
-///   dS/S = (r_d − r_f) dt + σ dW^d
+///   dS/S = (r_d(t) − r_f(t)) dt + σ dW^d
 ///
 /// where:
 ///   S       = spot FX rate (domestic per unit of foreign, e.g. USD/EUR)
-///   r_d     = continuously compounded domestic risk-free rate
-///   r_f     = continuously compounded foreign risk-free rate (acts as carry/dividend)
+///   r_d(t)  = instantaneous domestic forward rate at time t
+///   r_f(t)  = instantaneous foreign forward rate at time t (acts as carry)
 ///   σ       = flat implied volatility (lognormal Black-Scholes convention)
 ///   dW^d    = Brownian motion under Q^d
 ///
 /// ── Rates from term structures ────────────────────────────────────────────────
-/// Market.DomesticRate / Market.ForeignRate are zero-rate curves (Pillars), not
-/// flat scalars. At construction, each curve is interpolated once — at the
-/// option's expiry T, from the supplied valuation date, via
-/// ZeroCurve.InterpolateRate — to obtain single effective rates r_d = r_d(T),
-/// r_f = r_f(T). The simulated process is then exactly the flat-rate GBM above
-/// over [0, T]: the term structure only determines *which* flat rate applies
-/// to this trade (consistent with pricing a European payoff that depends only
-/// on the terminal distribution).
+/// Market.DomesticRate / Market.ForeignRate are zero-rate curves (Pillars).
+/// At construction, the instantaneous forward rate over each simulation step
+/// [t_i, t_{i+1}] is extracted via ZeroCurve.ForwardRate:
 ///
-/// Exact log-Euler discretization (no time-step error for GBM):
-///   S(t+dt) = S(t) · exp( (r_d − r_f − ½σ²)·dt + σ·√dt · Z_t )
+///   f_d(t_i, t_{i+1}) = (r_d(t_{i+1})·t_{i+1} − r_d(t_i)·t_i) / dt
 ///
-/// where Z_t ~ N(0,1) is drawn from SimulationCube[path, step, 0].
+/// The drift varies step-by-step, correctly reflecting the shape of the curve
+/// for path-dependent products (barriers, Asians, etc.). For flat curves this
+/// degenerates to the constant drift used previously.
+///
+/// DomesticRate / ForeignRate remain accessible as the terminal zero rates
+/// r_d(T), r_f(T) — used for the discount factor and available to subclasses.
+///
+/// Exact log-Euler discretization per step i:
+///   S(t_{i+1}) = S(t_i) · exp( (f_d(t_i,t_{i+1}) − f_f(t_i,t_{i+1}) − ½σ²)·dt + σ·√dt · Z_i )
+///
+/// where Z_i ~ N(0,1) is drawn from SimulationCube[path, i, 0].
 ///
 /// Discount factor:
-///   B(0,T) = exp(−r_d · T)
+///   B(0,T) = exp(−r_d(T) · T)
 ///
 /// ── Thread safety ────────────────────────────────────────────────────────────
 /// SimulatePath is called concurrently by MCBasePricer.Price(). Thread safety
@@ -50,7 +54,7 @@ namespace MCPricer.FX;
 /// threads simultaneously.
 ///
 /// Zero-vol edge case:
-///   When σ = 0 the spot path is deterministic: S(t) = S(0)·exp((r_d−r_f)·t).
+///   When σ = 0, _drifts[t] = (f_d − f_f)·dt and the path is deterministic.
 ///   SimulateSpotPath handles this without accessing the cube.
 /// </summary>
 public abstract class FXMCPricer : MCBasePricer
@@ -78,8 +82,8 @@ public abstract class FXMCPricer : MCBasePricer
     // without passing it through the EvaluatePayoff signature.
     private readonly ThreadLocal<int> _currentPathIndex = new();
 
-    private readonly double _drift;      // (r_d − r_f − ½σ²)·dt
-    private readonly double _diffusion;  // σ·√dt
+    private readonly double[] _drifts;    // per-step (f_d − f_f − ½σ²)·dt, length = cube.Steps
+    private readonly double   _diffusion; // σ·√dt
 
     /// <summary>
     /// The index of the path currently being evaluated on the calling thread.
@@ -114,8 +118,18 @@ public abstract class FXMCPricer : MCBasePricer
 
         DiscountFactor = Math.Exp(-DomesticRate * option.ExpiryYears);
 
-        _drift     = (DomesticRate - ForeignRate - 0.5 * volatility * volatility) * Dt;
         _diffusion = volatility * Math.Sqrt(Dt);
+
+        var halfSigSqDt = 0.5 * volatility * volatility * Dt;
+        _drifts = new double[cube.Steps];
+        for (var i = 0; i < cube.Steps; i++)
+        {
+            var t0 = i       * Dt;
+            var t1 = (i + 1) * Dt;
+            var fD = ZeroCurve.ForwardRate(market.DomesticRate, valuationDate, t0, t1);
+            var fF = ZeroCurve.ForwardRate(market.ForeignRate,  valuationDate, t0, t1);
+            _drifts[i] = (fD - fF) * Dt - halfSigSqDt;
+        }
 
         var steps = cube.Steps;   // capture for the lambda (avoids closing over `cube`)
         _spotBuffer = new ThreadLocal<double[]>(() => new double[steps]);
@@ -137,10 +151,9 @@ public abstract class FXMCPricer : MCBasePricer
 
         if (Volatility == 0.0)
         {
-            var deterministicStep = Math.Exp((DomesticRate - ForeignRate) * Dt);
             for (var t = 0; t < Cube.Steps; t++)
             {
-                s      *= deterministicStep;
+                s      *= Math.Exp(_drifts[t]);
                 buf[t]  = s;
             }
         }
@@ -148,7 +161,7 @@ public abstract class FXMCPricer : MCBasePricer
         {
             for (var t = 0; t < Cube.Steps; t++)
             {
-                s      *= Math.Exp(_drift + _diffusion * Cube[pathIndex, t, 0]);
+                s      *= Math.Exp(_drifts[t] + _diffusion * Cube[pathIndex, t, 0]);
                 buf[t]  = s;
             }
         }
