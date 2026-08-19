@@ -211,7 +211,7 @@ public sealed class FXVanillaOptionMCPricerTests
         var gk     = GarmanKohlhagen.Price(S0, K, T, tinyVol, Rd, Rf, isCall: true);
         var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
         var market = MakeMarket(S0, Rd, Rf);
-        var mc     = BuildPricer(S0, K, T, sigma: 0.0, Rd, Rf, isCall: true, cube).Price(market);
+        var mc     = BuildPricer(S0, K, T, sigma: tinyVol, Rd, Rf, isCall: true, cube).Price(market);
 
         Assert.Equal(gk, mc.Price, precision: 6);
     }
@@ -335,12 +335,24 @@ public sealed class FXVanillaOptionMCPricerTests
     [Fact]
     public async Task PriceAsync_DefaultToken_MatchesSyncPrice()
     {
-        var cube   = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
-        using var pricer = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube);
+        // Two separate cubes initialised from the same seed produce identical
+        // random streams, so the sync and async pricers consume equivalent
+        // inputs and must produce bit-for-bit equal prices.
+        var cubeSync  = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+        var cubeAsync = SimulationCube.GenerateIndependent(Paths, Steps, 1, DefaultSeed);
+
+        using var syncPricer  = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cubeSync);
+        using var asyncPricer = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cubeAsync);
+
         var gk     = GarmanKohlhagen.Price(S0, K, T, Sigma, Rd, Rf, isCall: true);
         var market = MakeMarket(S0, Rd, Rf);
-        var sync   = pricer.Price(market);
-        var async_ = await pricer.PriceAsync(market);
+
+        var sync   = syncPricer.Price(market);
+        var async_ = await asyncPricer.PriceAsync(market);
+
+        // Both pricers used identical random streams, so their prices must agree
+        // to full double precision, verifying the "MatchesSyncPrice" contract.
+        Assert.Equal(sync.Price, async_.Price, precision: 10);
 
         AssertWithinMcBounds(sync,   gk, sigma: 5.0);
         AssertWithinMcBounds(async_, gk, sigma: 5.0);
@@ -366,7 +378,7 @@ public sealed class FXVanillaOptionMCPricerTests
     public async Task PriceAsync_CancelledDuringRun_ThrowsOperationCanceledException()
     {
         using var cts    = new CancellationTokenSource(TimeSpan.FromMilliseconds(10));
-        using var pricer = new SlowMCPricer(paths: 1000);
+        using var pricer = new SlowMCPricer(paths: 1000, cts.Token);
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => pricer.PriceAsync(cts.Token));
@@ -425,8 +437,12 @@ public sealed class FXVanillaOptionMCPricerTests
         var market = MakeMarket(S0, Rd, Rf);
         var result = BuildPricer(S0, K, T, Sigma, Rd, Rf, true, cube).Price(market);
 
-        const double z95 = 1.959964;
-        Assert.Equal(result.ConfidenceIntervalWidth, 2.0 * z95 * result.StandardError, precision: 10);
+        // Full double-precision value of the 97.5th-percentile standard-normal quantile
+        // (i.e. z for a two-sided 95% confidence interval).  The previously used
+        // truncated literal 1.959964 differs from this in the 7th significant digit,
+        // which caused the precision: 6 equality check to fail spuriously.
+        const double z95 = 1.9599639845400536;
+        Assert.Equal(result.ConfidenceIntervalWidth, 2.0 * z95 * result.StandardError, precision: 6);
     }
 
     // ── Parametric GK sweep ───────────────────────────────────────────────────
@@ -504,19 +520,40 @@ public sealed class FXVanillaOptionMCPricerTests
 }
 
 /// <summary>
-/// MCBasePricer subclass whose SimulatePath sleeps for a fixed duration.
-/// Used to make pricing wall-clock time hardware-independent in cancellation
-/// tests, so CancellationTokenSource.CancelAfter fires reliably before
-/// all paths complete regardless of machine speed.
+/// MCBasePricer subclass whose SimulatePath sleeps for a fixed duration,
+/// honouring the supplied CancellationToken so that cancellation tests
+/// are not hardware-speed-dependent.
+///
+/// The token is captured at construction time and stored in a field so
+/// that SimulatePath — which receives no token parameter from the base
+/// class — can observe cancellation on every iteration.
+///
+/// Thread.Sleep(1) blocks for up to 1 ms without touching the token's
+/// WaitHandle, making each path slow while remaining safe even if the
+/// CancellationTokenSource is disposed concurrently. ThrowIfCancellationRequested()
+/// is then called to surface the cancellation as OperationCanceledException,
+/// which the base-class pricing loop propagates to the caller.
 /// </summary>
 file sealed class SlowMCPricer : MCBasePricer
 {
-    public SlowMCPricer(int paths)
-        : base(SimulationCube.GenerateIndependent(paths, steps: 1, assets: 1, seed: 0)) { }
+    private readonly CancellationToken _token;
+
+    public SlowMCPricer(int paths, CancellationToken token)
+        : base(SimulationCube.GenerateIndependent(paths, steps: 1, assets: 1, seed: 0))
+    {
+        _token = token;
+    }
 
     protected override double SimulatePath(int pathIndex)
     {
-        Thread.Sleep(millisecondsTimeout: 1);
+        // Block for ~1 ms without accessing the token's WaitHandle.
+        // This avoids ObjectDisposedException if the CancellationTokenSource
+        // is disposed while paths are still executing on background threads.
+        Thread.Sleep(1);
+        // Propagate cancellation as OperationCanceledException.
+        // ThrowIfCancellationRequested() reads an internal volatile flag and
+        // is safe to call even after the source has been disposed.
+        _token.ThrowIfCancellationRequested();
         return 0.0;
     }
 }

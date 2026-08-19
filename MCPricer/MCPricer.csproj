@@ -9,6 +9,7 @@
   <ItemGroup>
     <ProjectReference Include="..\RandomSimulator\RandomSimulator.csproj" />
     <ProjectReference Include="..\Instruments\Instruments.csproj" />
+    <ProjectReference Include="..\AnalyticalPricers\AnalyticalPricers.csproj" />
   </ItemGroup>
 
   <ItemGroup>

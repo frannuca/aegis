@@ -1,0 +1,962 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{tocloft}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\geometry{margin=2.5cm, headheight=14pt}
+\sloppy
+\tolerance=3000
+\emergencystretch=3em
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  urlcolor=blue!60!black,
+  pdfauthor={Aegis Quant},
+  pdftitle={Callable Bond Pricer -- Methodology and Mathematical Derivation}
+}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{gray},
+  breaklines=true,
+  frame=single,
+  backgroundcolor=\color{gray!8},
+  language=[Sharp]C,
+  showstringspaces=false
+}
+
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Q}{\mathbb{Q}}
+\newcommand{\QT}{\mathbb{Q}^T}
+\newcommand{\Qt}{\mathbb{Q}^t}
+\newcommand{\Qd}{\mathbb{Q}^d}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathcal{N}}
+\newcommand{\F}{\mathcal{F}}
+\newcommand{\Var}{\mathrm{Var}}
+\newcommand{\Cov}{\mathrm{Cov}}
+\newcommand{\coderef}[1]{\texttt{\color{blue!60!black}#1}}
+
+\theoremstyle{definition}
+\newtheorem{defn}{Definition}[section]
+\newtheorem{prop}{Proposition}[section]
+\newtheorem{remark}{Remark}[section]
+\newtheorem{assumption}{Assumption}[section]
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\textit{Aegis Quant -- Callable Bond Pricer}}
+\lhead{\leftmark}
+\cfoot{\thepage}
+
+\title{\textbf{Callable Bond Pricer}\\[0.4em]
+       \large Two-Factor Hull-White (G2++) Methodology,\\
+       Mathematical Derivation, and Longstaff-Schwartz Implementation}
+\author{Aegis Quant Library --- \texttt{MCPricer.Bonds}}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%%==========================================================================
+\section{Introduction and Scope}
+\label{sec:intro}
+%%==========================================================================
+
+This document is the complete mathematical and methodological reference for
+the callable bond pricer implemented in \coderef{MCPricer/Bonds}. It covers,
+in full derivation:
+
+\begin{itemize}[nosep]
+  \item the two-factor Hull-White (``G2++'') short-rate model of
+        Brigo \& Mercurio [\ref{brigo_mercurio}], including how it is fitted
+        to an arbitrary input discount curve;
+  \item the closed-form zero-coupon bond price $P(t,T)$ and the closed-form
+        European option on a zero-coupon bond (ZBO), used both as the
+        calibration pricing formula and as an analytical benchmark;
+  \item the nonlinear least-squares calibration procedure that fits the five
+        free model parameters to market ZBO prices;
+  \item the Monte Carlo simulation scheme (exact factor transition,
+        trapezoidal short-rate discounting);
+  \item the Longstaff \& Schwartz [\ref{longstaff_schwartz}] regression-based
+        valuation of the issuer's early-redemption (call) option; and
+  \item the validation methodology and known numerical limitations.
+\end{itemize}
+
+Every formula below is cross-referenced to the C\# source file and method
+that implements it (Section~\ref{sec:mapping} collects the full map). The
+implementation lives entirely in namespace \coderef{MCPricer.Bonds}: model
+(\coderef{G2ppParameters.cs}, \coderef{G2ppAnalytics.cs}), calibration
+(\coderef{G2ppCalibrator.cs}, \coderef{NelderMead.cs}), and the product and
+pricer (\coderef{CallableBondDefinition.cs},
+\coderef{CallableBondMCPricer.cs}), with tests in
+\coderef{MCPricer.Tests/Bonds}.
+
+\subsection{Product being priced}
+
+A \emph{callable bond} pays fixed coupons $c\cdot N/m$ at $m$ dates per year
+until maturity $T_M$, at which point the principal $N$ is redeemed. In
+addition, the issuer holds the right, at each date in a pre-specified
+\emph{call schedule} $\{t_1^c,\dots,t_n^c\}\subset(0,T_M)$, to redeem the
+bond early by paying $K_i\cdot N$ (the call price, a fraction of par) instead
+of the remaining cashflows. This is a Bermudan-style option against the
+bondholder: it can only reduce the bondholder's realized value relative to
+the equivalent non-callable (``bullet'') bond, never increase it.
+
+%%==========================================================================
+\section{The Two-Factor Hull-White (G2++) Short-Rate Model}
+\label{sec:g2pp}
+%%==========================================================================
+
+\subsection{Model dynamics and measure}
+
+Under the risk-neutral measure $\Q$ (numeraire: the money-market account
+$B(t)=\exp(\int_0^t r(s)\,\dd s)$), the short rate is decomposed into two
+correlated Ornstein-Uhlenbeck (OU) factors plus a deterministic shift:
+\begin{align}
+  \dd x(t) &= -a\,x(t)\,\dd t + \sigma\,\dd W_1(t), \qquad x(0)=0, \label{eq:x-sde}\\
+  \dd y(t) &= -b\,y(t)\,\dd t + \eta\,\dd W_2(t), \qquad y(0)=0, \label{eq:y-sde}\\
+  \dd W_1(t)\,\dd W_2(t) &= \rho\,\dd t, \label{eq:corr}\\
+  r(t) &= x(t) + y(t) + \varphi(t). \label{eq:short-rate}
+\end{align}
+Here $a,b>0$ are mean-reversion speeds, $\sigma,\eta\ge 0$ are factor
+volatilities, $\rho\in(-1,1)$ is the instantaneous correlation between the
+two Brownian drivers, and $\varphi(t)$ is a deterministic function chosen so
+that the model reproduces an arbitrary input discount curve exactly
+(derived in Section~\ref{sec:phi}). In code, the five free parameters
+$(a,\sigma,b,\eta,\rho)$ are the immutable \coderef{G2ppParameters} record
+(\coderef{A1, Sigma1, A2, Sigma2, Rho}).
+
+\begin{remark}[Why two factors]
+A one-factor Hull-White model produces perfectly correlated changes at every
+point of the yield curve (all forward rates move together, scaled by
+$B(a,\tau)$). Two imperfectly correlated factors ($\rho<1$) let short-end and
+long-end rate volatility decouple, which a single factor cannot reproduce --
+essential for calibrating simultaneously to short- and long-dated cap/swaption
+volatilities.
+\end{remark}
+
+\subsection{Explicit solution of the OU factors}
+\label{sec:ou-solution}
+
+Equation~\eqref{eq:x-sde} is a linear SDE; multiplying by the integrating
+factor $e^{at}$ and integrating gives the explicit (``exact'') solution
+\begin{equation}
+  x(t) = x(0)e^{-at} + \sigma\int_0^t e^{-a(t-u)}\,\dd W_1(u),
+  \label{eq:x-solution}
+\end{equation}
+and analogously for $y(t)$ with $(b,\eta,W_2)$. Because the stochastic
+integral in \eqref{eq:x-solution} is a Wiener integral of a deterministic
+integrand, $x(t)$ is Gaussian conditional on $\F_0$, with
+\[
+  \E[x(t)] = x(0)e^{-at}, \qquad
+  \Var[x(t)] = \sigma^2\int_0^t e^{-2a(t-u)}\,\dd u
+             = \frac{\sigma^2}{2a}\bigl(1-e^{-2at}\bigr).
+\]
+By the same Itô-isometry argument applied jointly to $x$ and $y$ (using
+$\dd W_1\dd W_2=\rho\,\dd t$),
+\begin{equation}
+  \Cov[x(t),y(t)] = \frac{\rho\sigma\eta}{a+b}\bigl(1-e^{-(a+b)t}\bigr).
+  \label{eq:xy-cov}
+\end{equation}
+
+\subsection{Exact discretization for simulation}
+\label{sec:exact-sim}
+
+Equation~\eqref{eq:x-solution} gives the exact transition law over a step
+$[t,t+\Delta]$: applying it with the lower integration limit shifted from $0$
+to $t$,
+\begin{equation}
+  x(t+\Delta) = x(t)e^{-a\Delta}
+              + \sigma\sqrt{\frac{1-e^{-2a\Delta}}{2a}}\;Z_1,
+  \qquad Z_1\sim\N(0,1),
+  \label{eq:exact-euler}
+\end{equation}
+and correspondingly for $y$ with $Z_2\sim\N(0,1)$, $\mathrm{Corr}(Z_1,Z_2)=\rho$.
+Because \eqref{eq:exact-euler} is the \emph{exact} conditional law (not a
+first-order Euler approximation), simulating $(x,y)$ this way introduces
+\emph{zero} time-discretization bias regardless of step size $\Delta$ --
+the only simulation error in the engine comes from the trapezoidal
+integration of $r(t)$ used for discounting (Section~\ref{sec:mc-discount}),
+not from the factor dynamics themselves. This is implemented in
+\coderef{CallableBondMCPricer.SimulateForward} as
+\lstinline{decay1 = exp(-A1*dt)}, \lstinline{vol1 = Sigma1*sqrt((1-exp(-2*A1*dt))/(2*A1))},
+consuming the correlated $(Z_1,Z_2)$ pair directly from
+\coderef{RandomSimulator.SimulationCube}, whose built-in Cholesky
+factorization of the $2\times2$ correlation matrix $\bigl[\begin{smallmatrix}1&\rho\\\rho&1\end{smallmatrix}\bigr]$
+supplies exactly the correlation required by \eqref{eq:corr}.
+
+%%==========================================================================
+\section{Fitting the Initial Term Structure}
+\label{sec:phi}
+%%==========================================================================
+
+\subsection{Bond price as a conditional expectation}
+
+By definition, the time-$t$ price of a zero-coupon bond maturing at $T$ is
+\begin{equation}
+  P(t,T) = \E^\Q\!\left[\exp\Bigl(-\int_t^T r(s)\,\dd s\Bigr)\,\Big|\,\F_t\right].
+  \label{eq:bond-def}
+\end{equation}
+Since $r(s)=x(s)+y(s)+\varphi(s)$ and $\varphi$ is deterministic, and since
+$x,y$ are jointly Gaussian conditional on $\F_t$ (Markov property of the OU
+process), the exponent's integral $I:=\int_t^T r(s)\,\dd s$ is Gaussian
+conditional on $\F_t$. Using $\E[e^{-I}]=\exp(-\E[I]+\tfrac12\Var[I])$ for a
+Gaussian $I$,
+\begin{equation}
+  P(t,T) = \exp\!\left(-\int_t^T\varphi(s)\,\dd s
+                        - \E\Bigl[\textstyle\int_t^T(x(s){+}y(s))\dd s\,\Big|\F_t\Bigr]
+                        + \tfrac12\Var\Bigl[\textstyle\int_t^T(x(s){+}y(s))\dd s\,\Big|\F_t\Bigr]\right).
+  \label{eq:bond-gaussian}
+\end{equation}
+
+\subsection{The conditional mean: the function $B(a,\tau)$}
+
+Define $B(a,\tau) := \dfrac{1-e^{-a\tau}}{a}$. From
+$\E[x(s)|\F_t]=x(t)e^{-a(s-t)}$,
+\[
+  \E\!\left[\int_t^T x(s)\,\dd s\,\Big|\,\F_t\right]
+  = x(t)\int_t^T e^{-a(s-t)}\,\dd s
+  = x(t)\,B(a,T-t),
+\]
+and analogously $\E[\int_t^T y\,\dd s|\F_t]=y(t)B(b,T-t)$.
+
+\subsection{The conditional variance: the kernel $V(\tau)$}
+\label{sec:v-derivation}
+
+Write $\tau=T-t$. Substituting the exact solution \eqref{eq:x-solution}
+(restarted at $t$) into the integral and swapping the order of integration
+(Fubini):
+\[
+  \int_t^T x(s)\,\dd s = x(t)B(a,\tau)
+    + \sigma\int_t^T\!\int_t^s e^{-a(s-u)}\dd W_1(u)\,\dd s
+    = x(t)B(a,\tau) + \sigma\int_t^T B(a,T-u)\,\dd W_1(u),
+\]
+using $\int_u^T e^{-a(s-u)}\dd s = B(a,T-u)$. The stochastic part is a Wiener
+integral, so by the Itô isometry (jointly for $x$ and $y$, using
+$\dd W_1\dd W_2=\rho\,\dd t$):
+{\small
+\begin{align}
+  \Var\!\left[\int_t^T(x(s){+}y(s))\dd s\right]
+  &= \sigma^2\!\int_t^T\! B(a,T{-}u)^2\dd u
+   + \eta^2\!\int_t^T\! B(b,T{-}u)^2\dd u
+   + 2\rho\sigma\eta\!\int_t^T\! B(a,T{-}u)B(b,T{-}u)\dd u. \label{eq:var-integral}
+\end{align}}
+Substituting $v=T-u$ (so $v$ ranges over $[0,\tau]$), the three integrals in
+\eqref{eq:var-integral} depend only on $\tau$ -- \emph{not} on $t$ and $T$
+separately -- because the OU coefficients are time-homogeneous and
+$x(0)=y(0)=0$. Evaluating each in closed form:
+{\small
+\[
+  \int_0^\tau B(a,v)^2\,\dd v = \frac{1}{a^2}\int_0^\tau\bigl(1-e^{-av}\bigr)^2\dd v
+  = \frac{1}{a^2}\left[\tau + \frac{2}{a}e^{-a\tau} - \frac{1}{2a}e^{-2a\tau} - \frac{3}{2a}\right],
+\]
+\[
+  \int_0^\tau B(a,v)B(b,v)\,\dd v = \frac{1}{ab}\int_0^\tau\bigl(1-e^{-av}\bigr)\bigl(1-e^{-bv}\bigr)\dd v
+  = \frac{1}{ab}\left[\tau + \frac{e^{-a\tau}-1}{a} + \frac{e^{-b\tau}-1}{b} - \frac{e^{-(a+b)\tau}-1}{a+b}\right].
+\]}
+Collecting terms, define the (time-homogeneous) \emph{variance kernel}
+{\small
+\begin{equation}
+  \begin{aligned}
+  V(\tau) := \;& \frac{\sigma^2}{a^2}\left[\tau + \frac{2}{a}e^{-a\tau} - \frac{1}{2a}e^{-2a\tau} - \frac{3}{2a}\right]
+   + \frac{\eta^2}{b^2}\left[\tau + \frac{2}{b}e^{-b\tau} - \frac{1}{2b}e^{-2b\tau} - \frac{3}{2b}\right] \\
+   & + \frac{2\rho\sigma\eta}{ab}\left[\tau + \frac{e^{-a\tau}-1}{a} + \frac{e^{-b\tau}-1}{b} - \frac{e^{-(a+b)\tau}-1}{a+b}\right].
+  \end{aligned}
+  \label{eq:v-function}
+\end{equation}}
+so that $\Var[\int_t^T(x{+}y)\dd s\,|\,\F_t] = V(T-t)$, independent of the
+conditioning state. One checks directly that $V(0)=0$ (every bracket
+vanishes at $\tau=0$), consistent with $P(t,t)=1$. Code:
+\coderef{G2ppAnalytics.VFunction} (private) implements \eqref{eq:v-function}
+verbatim.
+
+\subsection{The deterministic shift $\varphi(t)$}
+\label{sec:phi-derivation}
+
+Substituting the mean and variance above into \eqref{eq:bond-gaussian} with
+$t=0$, $x(0)=y(0)=0$:
+\begin{equation}
+  P(0,T) = \exp\!\left(-\int_0^T\varphi(s)\,\dd s + \tfrac12 V(T)\right).
+  \label{eq:p0T}
+\end{equation}
+No-arbitrage requires $P(0,T)=P^M(0,T)$ (the input market curve) for
+\emph{every} $T$. Solving \eqref{eq:p0T} for the integral and differentiating
+both sides with respect to $T$ (Leibniz rule) gives $\varphi$ pointwise:
+\begin{equation}
+  \int_0^T\varphi(s)\,\dd s = -\ln P^M(0,T) + \tfrac12 V(T)
+  \quad\Longrightarrow\quad
+  \varphi(T) = f^M(0,T) + \tfrac12\,\frac{\dd V}{\dd T}(T),
+  \label{eq:phi-integral-form}
+\end{equation}
+where $f^M(0,T)=-\partial_T\ln P^M(0,T)$ is the market instantaneous forward
+rate. Differentiating \eqref{eq:v-function} term by term (each bracket's
+derivative telescopes; e.g.\ $\frac{\dd}{\dd T}\bigl[\tfrac{2}{a}e^{-aT}-\tfrac{1}{2a}e^{-2aT}\bigr] = -2e^{-aT}+e^{-2aT}$, and adding the constant term's derivative $1$ gives $(1-e^{-aT})^2$):
+\[
+  \frac{\dd V}{\dd T}(T) = \sigma^2 B(a,T)^2 + \eta^2 B(b,T)^2 + 2\rho\sigma\eta\,B(a,T)B(b,T).
+\]
+Substituting into \eqref{eq:phi-integral-form} yields the closed form used by
+the code:
+\begin{equation}
+  \boxed{\;\varphi(t) = f^M(0,t)
+   + \frac{\sigma^2}{2a^2}\bigl(1-e^{-at}\bigr)^2
+   + \frac{\eta^2}{2b^2}\bigl(1-e^{-bt}\bigr)^2
+   + \frac{\rho\sigma\eta}{ab}\bigl(1-e^{-at}\bigr)\bigl(1-e^{-bt}\bigr)\;}
+  \label{eq:phi-final}
+\end{equation}
+This is the \emph{unique} deterministic shift making the model reprice the
+input curve exactly, for \emph{any} choice of $(a,\sigma,b,\eta,\rho)$ --
+curve-fitting and volatility calibration are fully decoupled. Code:
+\coderef{G2ppAnalytics.Phi}.
+
+\begin{remark}[Instantaneous forward via finite difference]
+$f^M(0,t)$ is not available in closed form from a piecewise-linear
+zero-rate curve; \coderef{G2ppAnalytics.InstantaneousForward} approximates it
+by a centered finite difference of \coderef{ZeroCurve.ForwardRate} over a
+window $[t-h,t+h]$ with $h=10^{-4}$ years ($\approx$ 53 minutes) -- far
+finer than any realistic curve pillar spacing, so the approximation error is
+negligible next to curve interpolation error itself.
+\end{remark}
+
+\subsection{Closed-form bond price $P(t,T)$}
+\label{sec:bond-price}
+
+Combining Sections~\ref{sec:v-derivation}--\ref{sec:phi-derivation}: from
+\eqref{eq:phi-integral-form},
+\[
+  \int_t^T\varphi(s)\,\dd s = \int_0^T\varphi\,\dd s - \int_0^t\varphi\,\dd s
+  = \ln\frac{P^M(0,t)}{P^M(0,T)} + \tfrac12\bigl(V(T)-V(t)\bigr),
+\]
+(here $V(T):=V(0,T)$, $V(t):=V(0,t)$ by the time-homogeneity noted above).
+Substituting into \eqref{eq:bond-gaussian} together with the mean/variance
+results:
+\begin{equation}
+  \boxed{\;P(t,T) = \frac{P^M(0,T)}{P^M(0,t)}
+    \exp\!\left(\tfrac12\bigl(V(T{-}t)-V(T)+V(t)\bigr)
+                - B(a,T{-}t)\,x(t) - B(b,T{-}t)\,y(t)\right)\;}
+  \label{eq:bond-price-final}
+\end{equation}
+Code: \coderef{G2ppAnalytics.ZeroCouponBondPrice}.
+
+\begin{prop}[Sanity checks]
+Formula \eqref{eq:bond-price-final} satisfies:
+\begin{enumerate}[nosep]
+  \item $P(0,T)=P^M(0,T)$ for $x(0)=y(0)=0$ (the exponent reduces to
+        $\tfrac12(V(T)-V(T)+V(0))=0$ since $V(0)=0$): the model reproduces
+        the input curve \emph{exactly}, independent of
+        $(a,\sigma,b,\eta,\rho)$.
+  \item $P(t,t)=1$ for any $x(t),y(t)$ (implemented as an explicit
+        $\tau=0$ short-circuit to avoid $0/0$ in $B(a,0)$).
+  \item $\partial P/\partial x(t) = -B(a,T-t)\,P(t,T) < 0$ and likewise for
+        $y$: a higher realized short-rate factor strictly lowers the bond
+        price, for any $a,\tau>0$.
+  \item $P(t,T)$ is strictly decreasing in $T$ for fixed $t$ (positive
+        rates $\Rightarrow$ longer maturities discount more).
+\end{enumerate}
+\end{prop}
+These four properties are exercised directly by
+\coderef{G2ppAnalyticsTests.cs}
+(\texttt{ZeroCouponBondPrice\_\allowbreak AtT0\_\allowbreak MatchesMarketCurveExactly},
+\texttt{...SameMaturityAsValuation\_\allowbreak IsOne},
+\texttt{...PositiveStateShiftsDownwardBondPrice},
+\texttt{...MonotonicallyDecreasingInMaturity}).
+
+%%==========================================================================
+\section{European Option on a Zero-Coupon Bond (ZBO)}
+\label{sec:zbo}
+%%==========================================================================
+
+The ZBO is the model's native calibration instrument: caps, floors, and (via
+standard approximations) swaptions all decompose into portfolios of options
+of this type, and -- because the model is Gaussian -- its price has the same
+closed form as a Black-76 option on a forward.
+
+\subsection{Setup}
+
+Consider a European call, expiring at $t$, on a zero-coupon bond of face
+value $N$ maturing at $T>t$, struck at $X$:
+\[
+  \text{payoff at } t: \quad N\cdot\bigl(P(t,T)-X/N\bigr)^+ \;=\; \bigl(N\,P(t,T)-X\bigr)^+.
+\]
+Its time-0 price is $\E^\Q\bigl[B(t)^{-1}(N P(t,T)-X)^+\bigr]$.
+
+\subsection{Change to the $t$-forward measure}
+
+Switch numeraire from the money-market account $B$ to the $t$-maturity bond
+$P(\cdot,t)$, defining the $t$-forward measure $\Qt$ (Section~2 of the
+companion theory document, \coderef{theory.tex}, develops the
+change-of-numeraire theorem in general; here $T$ there $=t$ here). Then
+\[
+  \text{ZBC}(t,T,X,N) = P(0,t)\;\E^{\Qt}\!\bigl[(N P(t,T)-X)^+\bigr].
+\]
+Girsanov's theorem states that changing measure from $\Q$ to $\Qt$ shifts the
+\emph{drift} of $x(t),y(t)$ but leaves their \emph{volatility structure}
+(quadratic variation) unchanged -- $x(t),y(t)$ remain jointly Gaussian under
+$\Qt$ with the \emph{same} variance/covariance as under $\Q$, only a
+different (in general, non-zero) mean. Since $\ln P(t,T)$ from
+\eqref{eq:bond-price-final} is an \emph{affine} function of $(x(t),y(t))$,
+it too remains Gaussian under $\Qt$, and its \emph{variance} under $\Qt$
+equals its variance under $\Q$ conditional on $\F_0$.
+
+\subsection{The variance $\Sigma^2(t,T)$}
+\label{sec:sigma2-derivation}
+
+From \eqref{eq:bond-price-final}, conditional on $\F_0$,
+\[
+  \ln P(t,T) = \text{(deterministic)} - B(a,\tau)x(t) - B(b,\tau)y(t), \qquad \tau=T-t,
+\]
+so, using the OU marginal variance/covariance from
+Section~\ref{sec:ou-solution} (evaluated under $\Q$, and by the Girsanov
+argument above equally valid under $\Qt$):
+{\small
+\begin{align}
+  \Sigma^2(t,T) &:= \Var\bigl[\ln P(t,T)\bigr]
+   = B(a,\tau)^2\Var[x(t)] + B(b,\tau)^2\Var[y(t)] + 2B(a,\tau)B(b,\tau)\Cov[x(t),y(t)] \notag\\
+   &= \frac{\sigma^2}{2a^3}\bigl(1-e^{-a\tau}\bigr)^2\bigl(1-e^{-2at}\bigr)
+    + \frac{\eta^2}{2b^3}\bigl(1-e^{-b\tau}\bigr)^2\bigl(1-e^{-2bt}\bigr) \notag\\
+   &\qquad + \frac{2\rho\sigma\eta}{ab(a+b)}\bigl(1-e^{-a\tau}\bigr)\bigl(1-e^{-b\tau}\bigr)\bigl(1-e^{-(a+b)t}\bigr).
+  \label{eq:sigma2}
+\end{align}}
+(Substitute $\Var[x(t)]=\tfrac{\sigma^2}{2a}(1-e^{-2at})$ and
+$B(a,\tau)^2=\tfrac{1}{a^2}(1-e^{-a\tau})^2$ to see the first term collapses
+to $\tfrac{\sigma^2}{2a^3}(1-e^{-a\tau})^2(1-e^{-2at})$; the cross term
+follows from \eqref{eq:xy-cov} the same way.) Code:
+\coderef{G2ppAnalytics.ZeroCouponBondOption} (inline, as \texttt{sigmaSq}).
+
+\subsection{Closed-form price}
+
+Because $\ln P(t,T)$ is Gaussian under $\Qt$ with known variance
+\eqref{eq:sigma2}, and because the forward bond price
+$F(0;t,T):=P(0,T)/P(0,t)$ is by construction a $\Qt$-martingale (the
+defining property of the forward measure), the expectation
+$\E^{\Qt}[(NP(t,T)-X)^+]$ is exactly the Black-76 formula applied to the
+lognormal forward $N\cdot F(0;t,T)$ with total (non-annualized) volatility
+$\Sigma(t,T)=\sqrt{\Sigma^2(t,T)}$:
+\begin{equation}
+  \boxed{\;
+  \begin{aligned}
+    \text{ZBC}(t,T,X,N) &= N\,P(0,T)\,\Phi(h_1) - X\,P(0,t)\,\Phi(h_2), \\
+    \text{ZBP}(t,T,X,N) &= X\,P(0,t)\,\Phi(-h_2) - N\,P(0,T)\,\Phi(-h_1), \\
+    h_1 &= \frac{1}{\Sigma}\ln\!\frac{N\,P(0,T)}{X\,P(0,t)} + \frac{\Sigma}{2}, \qquad
+    h_2 = h_1 - \Sigma.
+  \end{aligned}\;}
+  \label{eq:zbo-formula}
+\end{equation}
+This is structurally identical to Jamshidian's [\ref{jamshidian1989}]
+single-factor Hull-White bond-option formula, generalized to the
+two-correlated-factor variance \eqref{eq:sigma2}; see Brigo \& Mercurio
+[\ref{brigo_mercurio}], \S4.2. Code:
+\coderef{G2ppAnalytics.ZeroCouponBondOption}, using
+\coderef{AnalyticalPricers.NormalDistribution.Cdf} for $\Phi$.
+
+\subsection{Edge cases and identities}
+
+\begin{itemize}[nosep]
+  \item \textbf{Zero-vol limit} ($\Sigma\to0$): the code returns the
+        discounted intrinsic value $P(0,t)\cdot(F-X/N\cdot N)^+$ directly
+        (bypassing $\log(\cdot)/\Sigma$, which is a $0/0$ singularity),
+        matching the deterministic forward price
+        $F=N\,P(0,T)/P(0,t)$. Verified in
+        \texttt{ZboCall\_\allowbreak NearZeroVol\_\allowbreak MatchesDiscountedIntrinsic}.
+  \item \textbf{Deep ITM / deep OTM}: as $X\to0$ the call price
+        $\to N P(0,T)-XP(0,t)$ (pure discounted forward minus discounted
+        strike); as $X\to\infty$ it $\to0$. Verified in
+        \texttt{Zbo\_\allowbreak DeepItmCall\_\allowbreak ApproachesDiscountedForwardMinusStrike}
+        and \texttt{Zbo\_\allowbreak DeepOtmCall\_\allowbreak IsNearZero}.
+  \item \textbf{Put-call parity} (model-free, from
+        $(\cdot)^+-(-\cdot)^+=\cdot$): $\text{ZBC}-\text{ZBP} = N P(0,T) - X P(0,t)$,
+        verified to machine precision in \texttt{Zbo\_\allowbreak PutCallParity\_\allowbreak HoldsExactly}.
+\end{itemize}
+
+%%==========================================================================
+\section{Calibration Methodology}
+\label{sec:calibration}
+%%==========================================================================
+
+\subsection{Calibration instruments}
+
+A calibration instrument (\coderef{G2ppCalibrationInstrument}) is a tuple
+$(t_i,T_i,X_i,N_i,\text{isCall}_i,\text{MarketPrice}_i)$: a European
+zero-coupon-bond option with a known market price. In practice these would
+be derived from cap/floor or swaption quotes; that market-convention
+conversion is outside the scope of this pricer, which calibrates directly
+to ZBO prices.
+
+\subsection{Objective function}
+
+Given a candidate parameter vector $\theta=(a,\sigma,b,\eta,\rho)$, define
+the model price $\hat{P}_i(\theta)$ via \eqref{eq:zbo-formula} and minimize
+the mean squared \emph{relative} pricing error:
+\begin{equation}
+  \text{RMSE}(\theta)^2 = \frac{1}{n}\sum_{i=1}^n
+    \left(\frac{\hat{P}_i(\theta)-\text{MarketPrice}_i}{\text{MarketPrice}_i}\right)^2.
+  \label{eq:calib-objective}
+\end{equation}
+Relative errors are used (rather than absolute) so that instruments of very
+different price scales -- short-dated vs.\ long-dated options -- contribute
+comparably; an absolute-error objective would be dominated by the largest
+premium in the instrument set. Code: \coderef{G2ppCalibrator.Calibrate},
+local function \texttt{Objective}.
+
+\subsection{Unconstrained reparameterization}
+
+$\theta$ is constrained ($a,b>0$; $\sigma,\eta\ge0$; $\rho\in(-1,1)$), but
+the optimizer (Section~\ref{sec:nelder-mead}) is unconstrained. The search is
+performed over $u\in\R^5$ via the bijection
+\begin{equation}
+  a=e^{u_1},\quad \sigma=e^{u_2},\quad b=e^{u_3},\quad \eta=e^{u_4},\quad
+  \rho=\tanh(u_5),
+  \label{eq:reparam}
+\end{equation}
+so that every point visited by the simplex maps to a valid
+\coderef{G2ppParameters} instance; no boundary-handling logic is needed
+inside the objective.
+
+\subsection{Nelder-Mead simplex minimization}
+\label{sec:nelder-mead}
+
+The optimizer is the classical derivative-free downhill simplex method of
+Nelder \& Mead [\ref{nelder_mead}], chosen to avoid an external optimization
+dependency (the model has only $5$ parameters and the objective is cheap
+to evaluate in closed form, so gradient information is unnecessary).
+Standard textbook coefficients are used throughout: reflection $\alpha=1$,
+expansion $\gamma=2$, contraction $\rho_c=0.5$, shrink $\sigma_s=0.5$.
+
+\begin{algorithm}[H]
+\caption{Nelder-Mead (as implemented in \coderef{NelderMead.Minimize})}
+\begin{algorithmic}[1]
+\State Build an initial simplex of $n{+}1$ vertices in $\R^n$ from the guess $u_0$.
+\While{iterations $<$ max \textbf{and} spread of vertex values $\ge$ tol}
+  \State Sort vertices by objective value; let $\bar u$ = centroid of all but the worst.
+  \State \textbf{Reflect}: $u_r = \bar u + \alpha(\bar u - u_{\text{worst}})$.
+  \If{$f(u_r) < f(u_{\text{best}})$}
+    \State \textbf{Expand}: $u_e = \bar u + \gamma(\bar u - u_{\text{worst}})$; keep the better of $u_r,u_e$.
+  \ElsIf{$f(u_r) < f(u_{\text{second-worst}})$}
+    \State Accept $u_r$.
+  \Else
+    \State \textbf{Contract}: $u_c = \bar u + \rho_c(u_{\text{worst}} - \bar u)$.
+    \If{$f(u_c) < f(u_{\text{worst}})$} accept $u_c$
+    \Else{} \textbf{shrink} every vertex toward $u_{\text{best}}$ by $\sigma_s$
+    \EndIf
+  \EndIf
+\EndWhile
+\State \Return best vertex, its value, and a \texttt{Converged} flag.
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Overfitting guard and failure handling}
+
+The model has $5$ free parameters; \coderef{G2ppCalibrator.Calibrate}
+rejects (throws \coderef{ArgumentException}) any request with fewer than $5$
+instruments -- an underdetermined least-squares fit is curve-fitting noise,
+not calibration (see the quant-pricing review checklist item
+``calibration overfitting''). After optimization, if
+$\text{RMSE}(\hat\theta) > $ \texttt{maxAcceptableRmse} (default $10^{-3}$),
+the method throws \coderef{InvalidOperationException} rather than returning
+a poorly-fitted parameter set -- consistent with the library-wide rule of
+\emph{no silent fallback on calibration failure}.
+
+\subsection{Round-trip validation}
+
+The correct sanity check for a nonlinear least-squares fit to a handful of
+instruments is not that the raw parameter vector $\hat\theta$ matches a
+``true'' generating $\theta$ bit-for-bit (the fit need not be unique), but
+that \emph{the fitted model reprices the calibration instruments}. This is
+exactly what \coderef{G2ppCalibratorTests.Calibrate\_\allowbreak RecoversInstrumentPrices\_\allowbreak WithinTightTolerance}
+checks: synthetic ZBO prices are generated from a known $\theta_{\text{true}}$
+across a 7-instrument expiry/tenor/moneyness grid, then
+\coderef{G2ppCalibrator.Calibrate} is run on those prices alone, and every
+instrument is re-priced under $\hat\theta$ to relative error $<10^{-3}$.
+
+%%==========================================================================
+\section{Monte Carlo Simulation of the Model}
+\label{sec:mc}
+%%==========================================================================
+
+\subsection{Pricing identity}
+
+Under the money-market numeraire, the time-0 price of any payoff stream
+$\{CF_i \text{ at } t_i\}$ is
+\begin{equation}
+  V(0) = \E^\Q\!\left[\sum_i \frac{CF_i}{B(t_i)}\right],
+  \qquad B(t)=\exp\Bigl(\int_0^t r(s)\,\dd s\Bigr).
+  \label{eq:mc-price}
+\end{equation}
+\coderef{CallableBondMCPricer} simulates $(x,y)$ paths exactly
+(Section~\ref{sec:exact-sim}), builds $r(t_i)=x(t_i)+y(t_i)+\varphi(t_i)$
+on a fine uniform time grid, and accumulates $B(t_i)^{-1}$ path-by-path.
+
+\subsection{Fine grid and $\varphi$ precomputation}
+
+Let $T_M$ be the bond's maturity (in years from valuation) and let $n$ be the
+number of steps in the supplied \coderef{SimulationCube} (its \texttt{Steps}
+property); $\Delta t = T_M/n$. $\varphi(i\Delta t)$, $i=0,\dots,n$, is
+precomputed once via \eqref{eq:phi-final} (shared across all paths --
+\coderef{CallableBondMCPricer} constructor, field \texttt{\_\allowbreak phi}).
+
+\subsection{Discounting via trapezoidal integration}
+\label{sec:mc-discount}
+
+The continuous integral $\int_0^{t}r(s)\,\dd s$ in $B(t)^{-1}$ is approximated
+along each simulated path by the trapezoidal rule on the fine grid:
+\begin{equation}
+  B(t_i)^{-1} \approx \exp\!\left(-\sum_{k=1}^{i}\tfrac12\bigl(r(t_{k-1})+r(t_k)\bigr)\Delta t\right).
+  \label{eq:trapezoidal}
+\end{equation}
+The trapezoidal rule is exact for a piecewise-linear integrand and has local
+error $O(\Delta t^3)$ (global $O(\Delta t^2)$) for a smooth integrand; unlike
+the factor simulation (Section~\ref{sec:exact-sim}), this step is the
+\emph{only} source of time-discretization bias in the engine, and it
+vanishes as $\Delta t\to0$ (Section~\ref{sec:limitations} quantifies this
+in a deterministic setting where it can be measured exactly).
+
+\subsection{Correlated increments}
+
+The two driving Brownians in \eqref{eq:exact-euler} are supplied by
+\coderef{RandomSimulator.SimulationCube.Generate(paths, steps, assets{=}2, correlation)},
+where \texttt{correlation}$=\bigl[\begin{smallmatrix}1&\rho\\\rho&1\end{smallmatrix}\bigr]$.
+The constructor of \coderef{CallableBondMCPricer} validates that
+\texttt{cube.Correlation[0,1]} matches \coderef{G2ppParameters.Rho} to
+$10^{-9}$, since the cube's own Cholesky factorization -- not any code in
+the bond pricer -- is what actually correlates $Z_1,Z_2$.
+
+%%==========================================================================
+\section{The Callable Bond Product}
+\label{sec:product}
+%%==========================================================================
+
+\subsection{Cashflow schedule}
+
+\coderef{CallableBondDefinition.BuildCashflowSchedule} generates coupon
+dates by stepping backward from the maturity date in
+$12/m$-month increments ($m=$ \coderef{CouponsPerYear}), retaining only
+dates strictly after the valuation date, using Act/365 year fractions
+consistent with \coderef{ZeroCurve}. The final scheduled date carries both
+the last coupon and the principal redemption $N$.
+
+\subsection{Call schedule economics}
+
+Each call date $t_k^c$ carries a call price $K_k$ (fraction of par). From the
+\emph{bondholder's} perspective, being called at $t_k^c$ means receiving
+$K_k N$ instead of the (higher, in expectation, whenever the issuer chooses
+to call) remaining cashflows -- i.e.\ the bondholder is implicitly short a
+Bermudan option to the issuer. Formally, if $C(t_k^c)$ denotes the
+market value of continuing to hold the bond at $t_k^c$, the issuer calls
+iff $K_kN < C(t_k^c)$ (calling is cheaper for the issuer than continuing to
+owe the future cashflows), so the bondholder's realized value at $t_k^c$ is
+\begin{equation}
+  V(t_k^{c}) = \min\bigl(K_k N,\; C(t_k^c)\bigr).
+  \label{eq:call-decision}
+\end{equation}
+This is a no-arbitrage bound: $V(t_k^c)\le C(t_k^c)$ always, hence a
+callable bond can never be worth more than the corresponding bullet bond
+(verified in \texttt{CallableBond\_\allowbreak NeverWorthMoreThanBulletBond}).
+
+\subsection{Merged event grid}
+
+\coderef{CallableBondMCPricer.BuildEventGrid} merges the coupon schedule and
+the call schedule into a single chronologically sorted sequence of
+\emph{event nodes}, each carrying (year-fraction, cashflow amount,
+is-callable flag, call price). A date that is both a coupon date and a call
+date (the typical convention -- issuers call on coupon dates) is
+represented by a single node with both fields populated; this generalizes
+without special-casing. Each event's year-fraction is snapshotted to the
+nearest fine-grid index (Section~\ref{sec:discretization-bias} discusses the
+resulting, intentionally small, discretization error).
+
+%%==========================================================================
+\section{Longstaff-Schwartz Valuation of the Embedded Call}
+\label{sec:lsm}
+%%==========================================================================
+
+\subsection{Dynamic-programming formulation}
+
+Let $t_1<\dots<t_M$ be the merged event dates ($t_M=T_M$, maturity). Define,
+for each event index $k$ working \emph{backward}, the bondholder's value
+process $V_k$ (a random variable indexed by simulation path) satisfying the
+backward recursion
+\begin{equation}
+  V_M = \text{Coupon}_M + N, \qquad
+  V_k = \begin{cases}
+    \text{Coupon}_k + \min\bigl(K_kN,\;C_k\bigr) & \text{$t_k$ callable},\\[2pt]
+    \text{Coupon}_k + C_k & \text{otherwise},
+  \end{cases}
+  \label{eq:bellman}
+\end{equation}
+where $C_k = \E^\Q\bigl[V_{k+1}\cdot B(t_k)/B(t_{k+1})\,\big|\,\F_{t_k}\bigr]$
+is the continuation value discounted to $t_k$. This is a standard optimal
+stopping / Bellman recursion; the price is $\E[V_1\cdot B(0)/B(t_1)]$
+carried all the way back to $t=0$.
+
+\subsection{Why regression: avoiding look-ahead bias}
+
+$C_k$ is a conditional expectation given the Markov state $(x(t_k),y(t_k))$
+-- it cannot be computed exactly from a finite set of simulated paths
+without knowing the future optimal exercise policy, which is exactly what
+is being determined. Longstaff \& Schwartz [\ref{longstaff_schwartz}]'s
+insight is to \emph{estimate} $C_k$ by least-squares regression of the
+(already-known, from the backward pass so far) realized continuation values
+on a polynomial basis in the state, and to use this regression \emph{only}
+to decide whether to exercise -- never as the value carried backward when
+not exercising, which instead uses the actual realized (simulated)
+continuation. This avoids the look-ahead bias that would result from
+using an in-sample-optimal, path-omniscient exercise rule.
+
+\subsection{Basis functions}
+
+The regression basis used is the standard low-order polynomial basis for a
+two-factor Gaussian short-rate model (matching the low-order polynomial
+recommendation of [\ref{longstaff_schwartz}], \S3, adapted to two state
+variables):
+\begin{equation}
+  \psi(x,y) = \bigl(1,\; x,\; y,\; x^2,\; y^2,\; xy\bigr) \in \R^6.
+  \label{eq:basis}
+\end{equation}
+At each callable event $k$, ordinary least squares fits
+$\hat{C}_k(x,y)=\beta\cdot\psi(x,y)$ to the cross-sectional sample
+$\{(x_p(t_k), y_p(t_k), \text{pathPV}_p)\}_{p=1}^{\text{Paths}}$ by solving
+the normal equations $\Psi^\top\Psi\,\beta = \Psi^\top v$ via Gaussian
+elimination with partial pivoting on the resulting $6\times6$ system
+(\coderef{CallableBondMCPricer.RegressContinuation},
+\coderef{SolveLinearSystem}) -- small enough that no external linear-algebra
+dependency is warranted.
+
+\subsection{Reformulation in PV$_0$ units: the implemented algorithm}
+\label{sec:pv0-reformulation}
+
+Rather than carrying values forward in ``value at $t_k$'' units and
+discounting stepwise (the textbook LSM presentation), the implementation
+carries everything in \emph{present-value-at-0} (PV$_0$) units throughout,
+which removes an entire bookkeeping layer without changing the decision:
+scaling both sides of a comparison by the same positive discount factor
+$D(0,t_k)$ does not change which side is larger, so
+\[
+  K_kN < C_k \quad\Longleftrightarrow\quad K_kN\,D(0,t_k) < C_k\,D(0,t_k),
+\]
+i.e.\ the call decision can equivalently compare \emph{PV$_0$-of-call-value}
+against \emph{PV$_0$-of-continuation}. Let $\text{pathPV}_p$ accumulate the
+PV$_0$ of all cashflows from the currently-processed event onward, under the
+optimal policy determined so far (i.e.\ at later event nodes, already
+processed in this backward sweep). Processing event $k$ in decreasing order:
+
+\begin{algorithm}[H]
+\caption{Backward induction at event $k$ (per path $p$), as implemented in \coderef{CallableBondMCPricer.Price}}
+\begin{algorithmic}[1]
+\If{node $k$ is callable}
+  \State $\text{contPV}_p \gets \text{pathPV}_p$ \Comment{continuation value \emph{excluding} today's coupon}
+  \State Regress $\{\text{contPV}_p\}$ on $\psi(x_p(t_k),y_p(t_k))$ $\to$ coefficients $\hat\beta$
+  \For{each path $p$}
+    \State $\hat{C}_p \gets \hat\beta\cdot\psi(x_p(t_k),y_p(t_k))$
+    \State $\text{callValuePV}_p \gets K_k\cdot N \cdot D_p(0,t_k)$
+    \If{$\text{callValuePV}_p < \hat{C}_p$}
+      \State $\text{pathPV}_p \gets \text{callValuePV}_p$ \Comment{exercise: use the \emph{realized}, not estimated, call value}
+    \EndIf
+    \Comment{else: pathPV$_p$ unchanged $=$ its realized (simulated) continuation}
+  \EndFor
+\EndIf
+\State $\text{pathPV}_p \gets \text{pathPV}_p + \text{Coupon}_k\cdot D_p(0,t_k)$ for every path $p$
+   \Comment{coupon received unconditionally, added \emph{after} the decision}
+\end{algorithmic}
+\end{algorithm}
+
+The final price and its Monte Carlo standard error are computed from
+$\{\text{pathPV}_p\}_{p=1}^{\text{Paths}}$ exactly as in
+\coderef{MCBasePricer.BuildResult} (sample mean, sample standard error,
+$\pm1.9599639845400536\times$SE for the 95\% confidence interval).
+
+\begin{remark}[Coupon/call coincidence]
+Separating the coupon addition (unconditional, step 8) from the call
+decision (steps 1--7, using the \emph{pre-coupon} continuation value)
+correctly handles the common convention that a called bond still pays the
+accrued coupon due on the call date: that coupon is received regardless of
+the call decision, so it must not be included on either side of the
+comparison in step 5 -- only the call price and the value of remaining
+\emph{future} cashflows compete.
+\end{remark}
+
+%%==========================================================================
+\section{Numerical Implementation Notes}
+\label{sec:implementation}
+%%==========================================================================
+
+\subsection{Memory layout}
+
+Only state at event nodes is retained across the forward pass -- not the
+full fine-grid path -- via arrays \texttt{xAtEvent}, \texttt{yAtEvent},
+\texttt{dAtEvent} of shape (Paths $\times$ NumEvents). NumEvents is small
+(coupon frequency $\times$ years, plus call dates), so this is
+$O(\text{Paths}\times\text{NumEvents})$ rather than
+$O(\text{Paths}\times\text{Steps})$, letting the fine grid
+(Section~\ref{sec:mc-discount}) be arbitrarily refined for discounting
+accuracy without inflating memory.
+
+\subsection{Parallelism}
+
+The forward simulation pass (\coderef{SimulateForward}) uses
+\lstinline{Parallel.For} over paths, matching the concurrency pattern used
+throughout the library (\coderef{MCBasePricer}); each path writes only to
+its own row of the event-snapshot matrices, so no synchronization is
+needed. The backward LSM pass is inherently sequential across events (each
+regression depends on the previous event's decisions) but parallel across
+paths within each event.
+
+\subsection{DV01}
+
+\coderef{CallableBondMCPricer.ComputeDv01} bumps the discount curve by
+$\pm\epsilon$ (default $1$bp) via \coderef{ZeroCurve.Shift} and reprices on
+the \emph{same} \coderef{SimulationCube} (common random numbers reduce
+finite-difference variance, matching the Greek methodology used by every
+other pricer in the library, e.g.\ \coderef{MCBasePricer.ComputeGreeks}).
+Because $\varphi(t)$ in \eqref{eq:phi-final} depends on the curve, bumping
+the curve correctly perturbs \emph{both} discounting and the model drift.
+
+%%==========================================================================
+\section{Validation and Benchmarks}
+\label{sec:validation}
+%%==========================================================================
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}p{3.6cm}p{6.2cm}p{5.0cm}@{}}\toprule
+\textbf{Check} & \textbf{What it validates} & \textbf{Test}\\\midrule
+Curve reproduction & $P(0,T)=P^M(0,T)$ exactly, any $\theta$ &
+  \S\ref{sec:bond-price}, \texttt{G2ppAnalyticsTests} \\
+Put-call parity & Model-free ZBO identity, to machine precision &
+  \texttt{Zbo\_\allowbreak PutCallParity\_\allowbreak HoldsExactly} \\
+Zero-vol / deep ITM / deep OTM & ZBO collapses to discounted intrinsic &
+  \texttt{ZboCall\_\allowbreak NearZeroVol\_\allowbreak ...}, \texttt{Zbo\_\allowbreak Deep*} \\
+Calibration round-trip & Fitted $\hat\theta$ reprices calibration instruments &
+  \texttt{Calibrate\_\allowbreak RecoversInstrumentPrices\_\allowbreak ...} \\
+Bullet-bond benchmark & MC price $\approx$ closed-form curve-discount sum &
+  \texttt{NoCallSchedule\_\allowbreak Matches...}, \texttt{CallPriceNeverReached\_\allowbreak Matches...} \\
+No-arbitrage bound & Callable price $\le$ bullet price &
+  \texttt{CallableBond\_\allowbreak NeverWorthMoreThanBulletBond} \\
+Deterministic zero-vol trace & LSM decision correct with zero MC noise &
+  \texttt{ZeroVol\_\allowbreak DeepItmCall\_\allowbreak ...}, \texttt{ZeroVol\_\allowbreak NoCallSchedule\_\allowbreak ...} \\
+DV01 sign & Fixed-coupon bond value falls as rates rise &
+  \texttt{Dv01\_\allowbreak IsNegative\_\allowbreak ForFixedCouponBond} \\
+Input validation & Cube shape, correlation match, date ordering &
+  \texttt{Constructor\_\allowbreak Rejects*}, \texttt{CallableBondDefinition\_\allowbreak Rejects*} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+All 32 tests in \coderef{MCPricer.Tests/Bonds} pass with the deterministic
+seed convention used throughout the library (seed $=42$).
+
+%%==========================================================================
+\section{Known Limitations}
+\label{sec:limitations}
+%%==========================================================================
+
+\begin{itemize}[nosep]
+  \item \textbf{LSM in-sample bias.} Using the same simulated paths for both
+        the continuation regression and the final valuation is known to
+        introduce a small, generally upward, bias in American/Bermudan-style
+        LSM prices -- the regression has effectively ``seen'' the payoff
+        it is trying to predict. This is not corrected here; an
+        (asymptotically) bias-free estimate would require an independent
+        out-of-sample path set for the final valuation pass, at roughly
+        double the simulation cost. Documented in the class-level comment of
+        \coderef{CallableBondMCPricer}.
+  \item \textbf{Event-to-grid rounding bias.} \label{sec:discretization-bias}
+        Coupon dates are Act/365 calendar-day-count year fractions that in
+        general do not land exactly on the uniform fine simulation grid;
+        \coderef{BuildEventGrid} snapshots each event at its \emph{nearest}
+        grid node, an $O(\Delta t)$ discretization error. In a controlled
+        deterministic (zero-vol) test this measures at $\approx 2\times10^{-3}$
+        absolute (on a par-100 bond) with a $12$-steps-per-year grid, and
+        shrinks to $<10^{-3}$ with a daily grid -- consistent with an
+        $O(\Delta t)$ error that vanishes as the grid is refined. This is an
+        intentional engineering trade-off (uniform grid vs.\ exact per-event
+        alignment) documented in \coderef{CallableBondMCPricerTests}.
+  \item \textbf{Trapezoidal discounting bias.} Section~\ref{sec:mc-discount}'s
+        rule is exact only for a piecewise-linear short-rate path; on a flat
+        curve with $\sigma=\eta=0$ (so $r(t)\equiv\varphi(t)\equiv$ const) it
+        is exact identically, since the true integral of a constant is
+        trivially linear. For non-trivial $\sigma,\eta$, the bias is
+        $O(\Delta t^2)$ globally and is not separately isolated from Monte
+        Carlo sampling noise in the current test suite (it is dominated by
+        MC standard error at the path counts used).
+\end{itemize}
+
+%%==========================================================================
+\section{Code-to-Formula Mapping}
+\label{sec:mapping}
+%%==========================================================================
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}p{5.0cm}p{8.4cm}p{1.7cm}@{}}\toprule
+\textbf{File / Member} & \textbf{Formula} & \textbf{Section}\\\midrule
+\texttt{G2ppParameters.cs} & $(a,\sigma,b,\eta,\rho)$, validated & \ref{sec:g2pp} \\
+\texttt{G2ppAnalytics.InstantaneousForward} & $f^M(0,t)$ (finite difference) & \ref{sec:phi-derivation} \\
+\texttt{G2ppAnalytics.Phi} & $\varphi(t)$, eq.~\eqref{eq:phi-final} & \ref{sec:phi-derivation} \\
+\texttt{G2ppAnalytics.VFunction} (private) & $V(\tau)$, eq.~\eqref{eq:v-function} & \ref{sec:v-derivation} \\
+\texttt{G2ppAnalytics.ZeroCouponBondPrice} & $P(t,T)$, eq.~\eqref{eq:bond-price-final} & \ref{sec:bond-price} \\
+\texttt{G2ppAnalytics.ZeroCouponBondOption} & ZBO, eq.~\eqref{eq:zbo-formula} & \ref{sec:zbo} \\
+\texttt{G2ppCalibrationInstrument} & Calibration target tuple & \ref{sec:calibration} \\
+\texttt{G2ppCalibrator.Calibrate} & RMSE objective eq.~\eqref{eq:calib-objective}, reparam.\ eq.~\eqref{eq:reparam} & \ref{sec:calibration} \\
+\texttt{NelderMead.Minimize} & Downhill simplex & \ref{sec:nelder-mead} \\
+\texttt{CallableBondDefinition.\allowbreak BuildCashflowSchedule} & Coupon schedule generation & \ref{sec:product} \\
+\texttt{CallableBondMCPricer} ctor & Curve/cube validation, $\varphi$ precompute & \ref{sec:mc} \\
+\texttt{CallableBondMCPricer.\allowbreak SimulateForward} & Exact OU step eq.~\eqref{eq:exact-euler}; trapezoidal $B(t)^{-1}$ eq.~\eqref{eq:trapezoidal} & \ref{sec:exact-sim}, \ref{sec:mc-discount} \\
+\texttt{CallableBondMCPricer.\allowbreak BuildEventGrid} & Merged coupon/call event timeline & \ref{sec:product} \\
+\texttt{CallableBondMCPricer.\allowbreak RegressContinuation} & OLS on basis eq.~\eqref{eq:basis} & \ref{sec:lsm} \\
+\texttt{CallableBondMCPricer.\allowbreak SolveLinearSystem} & Gaussian elimination (partial pivot) & \ref{sec:lsm} \\
+\texttt{CallableBondMCPricer.Price} & Backward induction eq.~\eqref{eq:bellman}, \S\ref{sec:pv0-reformulation} & \ref{sec:lsm} \\
+\texttt{CallableBondMCPricer.\allowbreak AnalyticalBulletBondPrice} & Model-independent benchmark & \ref{sec:validation} \\
+\texttt{CallableBondMCPricer.\allowbreak ComputeDv01} & Curve-bump Greek & \ref{sec:implementation} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%%==========================================================================
+\section*{References}
+%%==========================================================================
+\addcontentsline{toc}{section}{References}
+
+\begin{enumerate}[label={[\arabic*]}]
+  \item\label{brigo_mercurio} Brigo, D.\ and Mercurio, F.\ (2006).
+        \textit{Interest Rate Models -- Theory and Practice}, 2nd ed.\
+        Springer Finance. \S3 (one-factor Hull-White / Vasicek) and \S4.2
+        (the two-factor additive Gaussian model, G2++): dynamics, the
+        curve-fitting shift $\varphi(t)$, the zero-coupon bond price, and
+        the option-on-a-zero-coupon-bond formula.
+  \item\label{longstaff_schwartz} Longstaff, F.A.\ and Schwartz, E.S.\ (2001).
+        ``Valuing American options by simulation: a simple least-squares
+        approach.'' \textit{Review of Financial Studies} 14(1): 113--147.
+  \item\label{nelder_mead} Nelder, J.A.\ and Mead, R.\ (1965).
+        ``A simplex method for function minimization.''
+        \textit{The Computer Journal} 7(4): 308--313.
+  \item\label{jamshidian1989} Jamshidian, F.\ (1989).
+        ``An exact bond option formula.''
+        \textit{The Journal of Finance} 44(1): 205--209.
+  \item\label{vasicek1977} Vasicek, O.\ (1977).
+        ``An equilibrium characterization of the term structure.''
+        \textit{Journal of Financial Economics} 5(2): 177--188.
+  \item\label{hull_white1994} Hull, J.\ and White, A.\ (1994).
+        ``Numerical procedures for implementing term structure models I:
+        single-factor models.'' \textit{Journal of Derivatives} 2(1): 7--16.
+\end{enumerate}
+
+\end{document}
